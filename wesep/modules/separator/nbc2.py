@@ -1,13 +1,16 @@
+# Reference:
+#   [1] Quan C, Li X. NBC2: Multichannel speech separation with revised narrow-band conformer
+#   [2] Original codebase: https://github.com/Audio-WestlakeU/NBSS
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.nn.init as init
 from torch import Tensor
 from torch.nn import Module, MultiheadAttention
 from torch.nn.parameter import Parameter
-from typing import Any, Dict, Optional, Tuple, Union
-import math
-
+from typing import Any, Dict, Optional, Tuple
+from wesep.modules.feature.speech import STFT,iSTFT
+import numpy as np
 
 class LayerNorm(nn.LayerNorm):
     def __init__(self, transpose: bool, **kwargs) -> None:
@@ -108,16 +111,6 @@ class GroupBatchNorm(Module):
     def extra_repr(self) -> str:
         return '{dim_hidden}, {group_size}, share_along_sequence_dim={share_along_sequence_dim}, transpose={transpose}, eps={eps}, affine={affine}'.format(**self.__dict__)
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.nn.init as init
-from torch import Tensor
-from torch.nn import Module, MultiheadAttention
-from torch.nn.parameter import Parameter
-from typing import Any, Dict, Optional, Tuple, Union
-import math
-
 class NBC2Encoder(nn.Module):
     def __init__(self, input_size: int, dim_hidden: int, kernel_size: int = 5):
         super().__init__()
@@ -145,21 +138,24 @@ class NBC2Encoder(nn.Module):
         return x
 
 class NBC2Decoder(nn.Module):
-    def __init__(self, dim_hidden: int, output_size: int):
+    def __init__(self, dim_hidden: int, n_spk: int = 1):
         super().__init__()
-        self.linear = nn.Linear(in_features=dim_hidden, out_features=output_size)
+        self.nspk = n_spk
+        self.linear = nn.Linear(in_features=dim_hidden, out_features=n_spk * 2)
 
     def forward(self, x: Tensor) -> Tensor:
         """
         Input:  (B, C_in, F, T)
-        Output: (B, C_out, F, T)
+        Output: (B, 2, nspk, F, T)
         """
         B, C, F, T = x.shape
         x = x.permute(0, 2, 3, 1).contiguous()
 
-        x = self.linear(x) # (B, F, T, output_size)
+        x = self.linear(x) # (B, F, T, nspk * 2)
         
-        x = x.permute(0, 3, 1, 2).contiguous()
+        x = x.view(B, F, T, self.nspk, 2)
+        
+        x = x.permute(0, 4, 3, 1, 2).contiguous()
         
         return x
 
@@ -194,7 +190,7 @@ class NBC2Block(nn.Module):
 
     def forward(self, x: Tensor, att_mask: Optional[Tensor] = None) -> Tuple[Tensor, Tensor]:
         """
-        Input:  (B, C, F, T)  <-- 标准化接口
+        Input:  (B, C, F, T)
         Output: (B, C, F, T), attn
         """
         B, C, F, T = x.shape
@@ -233,27 +229,87 @@ class NBC2Block(nn.Module):
         return norm
 
 class NBC2(nn.Module):
-    def __init__(self, input_size: int, output_size: int, n_layers: int, encoder_kernel_size: int = 5, dim_hidden: int = 192, dim_ffn: int = 384, block_kwargs: Dict[str, Any] = {}) -> None:
+    def __init__(
+        self, 
+        win, 
+        stride,
+        spec_dim, 
+        n_layers, 
+        encoder_kernel_size=5, 
+        dim_hidden=192, 
+        dim_ffn=384, 
+        n_spk=1, # For Separation (multiple output)
+        block_kwargs={}
+    ):
         super().__init__()
         
-        self.encoder = NBC2Encoder(input_size=input_size, dim_hidden=dim_hidden, kernel_size=encoder_kernel_size)
+        self.stft = STFT(win,stride,win)
+        self.encoder = NBC2Encoder(input_size=spec_dim, dim_hidden=dim_hidden, kernel_size=encoder_kernel_size)
         
         self.sa_layers = nn.ModuleList()
         for l in range(n_layers):
             self.sa_layers.append(NBC2Block(dim_hidden=dim_hidden, dim_ffn=dim_ffn, **block_kwargs))
 
-        self.decoder = NBC2Decoder(dim_hidden=dim_hidden, output_size=output_size)
+        self.decoder = NBC2Decoder(dim_hidden=dim_hidden, n_spk=n_spk)
+        self.istft = iSTFT(win,stride,win)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x):
         """
-        Input:  (B, C_in, F, T)
-        Output: (B, C_out, F, T)
+        Input:  (B, C, T)
+        Output: (B, 1, T)
         """
-        x = self.encoder(x)
+        spec = self.stft(x)[-1]
+        
+        spec_RI = torch.cat([spec.real,spec.imag],dim=1)
+        
+        x = self.encoder(spec_RI)
         
         for m in self.sa_layers:
             x, attn = m(x)
             del attn
         y = self.decoder(x)
         
-        return y
+        y_complex = torch.complex(y[:,0],y[:,1])
+        
+        out_wav = self.istft(y_complex)
+        return out_wav
+
+if __name__ == "__main__":
+    from thop import profile, clever_format
+    block_kwargs = {
+        'n_heads': 2,
+        'dropout': 0.1,
+        'conv_kernel_size': 3,
+        'n_conv_groups': 8,
+        'norms': ("LN", "GBN", "GBN"),
+        'group_batch_norm_kwargs': {
+            'share_along_sequence_dim': False,
+            'group_size': 257, # win // 2 + 1     
+        }
+    }
+    model = NBC2(
+        win=512,
+        stride=256,
+        input_size=2, # for only ref-channel input 
+        n_spk=1,
+        n_layers=8,
+        dim_hidden=96,
+        dim_ffn=96*2,
+        block_kwargs=block_kwargs,
+    )
+
+    s = 0
+    for param in model.parameters():
+        s += np.product(param.size())
+    print("# of parameters: " + str(s / 1024.0 / 1024.0))
+
+    x = torch.randn(1, 1, 16000)
+    model = model.eval()
+    with torch.no_grad():
+        output = model(x)
+    print(output.shape)
+
+    exit()
+    macs, params = profile(model, inputs=(x, ))
+    macs, params = clever_format([macs, params], "%.3f")
+    print(macs, params)

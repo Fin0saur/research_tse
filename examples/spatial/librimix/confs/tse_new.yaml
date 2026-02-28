@@ -36,7 +36,7 @@ whole_utt: True
 #   loss_weight: [[1.0],[1.0]]
 
 model:
-  tse_model: TSE_NBC2_SPATIAL
+  tse_model: TSE_NEW
 model_args:
   tse_model:
     win: 512         
@@ -75,14 +75,12 @@ model_args:
           enabled: True       
         delta_stft: 
           enabled: True
-        cyc_doaemb:
+        posterior_mask: 
           enabled: True
-          cyc_alpha: 20
-          cyc_dimension: 40
-          use_ele: True
-          out_channel: 1          
+          hidden_dim: 32
           fusion_type: multiply
-        
+          num_encoder: 1
+                
 
 # find_unused_parameters: True
 

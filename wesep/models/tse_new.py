@@ -48,9 +48,6 @@ class TSE_NEW(nn.Module):
                     "enabled": False, 
                     "num_encoder": 1
                 },
-                "cyc_doa_emb": {
-                    "enabled": False,
-                },
                 # >>> 新增：深度后验掩码配置 <<<
                 "posterior_mask": {
                     "enabled": True, 
@@ -100,10 +97,6 @@ class TSE_NEW(nn.Module):
             self.sep_configs["spec_dim"] += n_pairs * self.spatial_configs["features"]["sdf"]["num_encoder"]
         if self.spatial_configs["features"]["delta_stft"]["enabled"]:
             self.sep_configs["spec_dim"] += 2 * n_pairs * self.spatial_configs["features"]["delta_stft"]["num_encoder"]
-            
-        if self.spatial_configs["features"]["Multiply_emb"]["enabled"]:
-            self.spatial_configs['features']['Multiply_emb']['out_channel'] = self.sep_configs["dim_hidden"] 
-            self.spatial_configs['features']['Multiply_emb']['num_encoder'] = self.sep_configs["n_layers"]
             
         # 注意：posterior_mask 使用 multiply 注入主干的隐藏层，不需要增加 spec_dim
 
@@ -171,9 +164,6 @@ class TSE_NEW(nn.Module):
         
         for idx, m in enumerate(self.sep_model.sa_layers): # nbc2_block
             # cyc_doaemb ele-multiply
-            if self.spatial_configs['features']['Multiply_emb']['enabled']:
-                cyc_doaemb = self.spatial_ft.features['Multiply_emb'].compute(azi=azi_rad, ele=ele_rad, layer_idx=idx)
-                encode_features = self.spatial_ft.features['Multiply_emb'].post(encode_features, cyc_doaemb, layer_idx=idx)
             encode_features, _ = m(encode_features)
         
         est_spec_feat = self.sep_model.decoder(encode_features)
