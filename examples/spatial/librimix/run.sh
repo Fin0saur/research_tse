@@ -14,14 +14,14 @@ fs=16k
 min_max=min
 noise_type="clean"
 data_type="raw" # shard/raw
-Libri2Mix_dir=/root/Spatial_librimix #/YourPATH/librimix/Libri2Mix_spatial
+Libri2Mix_dir=/data1/yxy05/Spatial_librimix #/YourPATH/librimix/Libri2Mix_spatial
 mix_data_path="${Libri2Mix_dir}/wav${fs}/${min_max}"
 
 # Training related
-gpus="[0,1,2,3,4,5]"
-config=confs/tse_nbc2_spatial.yaml
+gpus="[0,1]"
+config=confs/tse_new.yaml
 data_config=confs/create_dataset.yaml
-exp_dir=exp/TSE_nbc2_test_all
+exp_dir=exp/TSE_new1
 if [ -z "${config}" ] && [ -f "${exp_dir}/config.yaml" ]; then
   config="${exp_dir}/config.yaml"
 fi
@@ -49,7 +49,7 @@ fi
 
 if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
   echo "Prepare datasets ..."
-  ./local/prepare_data.sh --mix_data_path ${mix_data_path} \ 
+  ./local/prepare_data.sh --mix_data_path ${mix_data_path} \
     --data ${data} \
     --noise_type ${noise_type} \
     --stage 1 \

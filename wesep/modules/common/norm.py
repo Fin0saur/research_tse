@@ -136,3 +136,30 @@ class ConditionalLayerNorm(nn.Module):
     def extra_repr(self):
         return "{normalized_shape}, {embed_dim}, \
             modulate_bias={modulate_bias}, eps={eps}".format(**self.__dict__)
+
+class AmplitudeNorm(nn.Module):
+    """
+    Simple Amplitude Normalization (Parameter-free)
+    """
+    def __init__(self, eps=1e-8):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, x):
+        # x: (B, C, F, T) or (B, F, T)
+        if x.dim() == 4:
+            ref = x[:, 0]
+        else:
+            ref = x
+        mag = torch.abs(ref).mean(dim=(1, 2), keepdim=True) + self.eps
+        if x.dim() == 4:
+            scale = mag.unsqueeze(1) # (B, 1, 1, 1)
+        else:
+            scale = mag.unsqueeze(1) # (B, 1, 1)
+        return x / scale, scale
+        
+    def inverse(self, y, scale):
+        if y.dim() == 2: scale = scale.view(y.shape[0], 1)
+        elif y.dim() == 3: scale = scale.view(y.shape[0], 1, 1)
+        elif y.dim() == 4: scale = scale.view(y.shape[0], 1, 1, 1)
+        return y * scale

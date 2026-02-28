@@ -42,7 +42,6 @@ class BaseSpatialFeature(nn.Module):
 
     def post(self, mix_repr, spatial_repr):
         raise NotImplementedError
-
 class CycEncoder(BaseSpatialFeature):
     def __init__(self, config):
         super().__init__(config)
@@ -189,7 +188,98 @@ class DSTFTFeature(BaseSpatialFeature):
 
     def post(self, mix_repr, spatial_repr):
         return torch.cat([mix_repr, spatial_repr], dim=1)
+class PosteriorMaskFeature(BaseSpatialFeature):
+    """
+    深度后验交互特征 (对应方案一)
+    使用 TPD (具备频率维度) 作为 DOA 的表征，与 IPD 在特征空间进行相似度交互，生成软掩码。
+    """
+    def __init__(self, config, geometry_ctx=None):
+        super().__init__(config, geometry_ctx)
+        
+        self.enabled = config.get('enabled', False)
+        self.hidden_dim = config.get('hidden_dim', 32)
+        self.fusion = config.get('fusion_type', 'multiply') # 支持 'multiply' 或 'concat'
+        
+        # 输入通道为 pairs 的 2 倍 (因为我们要输入 cos(相位) 和 sin(相位) 避免相位卷绕)
+        self.num_pairs = len(self._get_pairs(None))
+        in_channels = self.num_pairs * 2
+        
+        # 1. Mixture Encoder (处理实际观测到的 IPD)
+        self.proj_mix = nn.Sequential(
+            nn.Conv2d(in_channels, self.hidden_dim, kernel_size=1),
+            nn.BatchNorm2d(self.hidden_dim),
+            nn.PReLU()
+        )
+        
+        # 2. DOA Encoder (处理带有频率维度的理论 TPD)
+        self.proj_doa = nn.Sequential(
+            nn.Conv2d(in_channels, self.hidden_dim, kernel_size=1),
+            nn.BatchNorm2d(self.hidden_dim),
+            nn.PReLU()
+        )
+        
+        # 3. 后验掩码生成器 (处理交互后的特征)
+        self.posterior_refiner = nn.Sequential(
+            # 使用 3x3 卷积在时频域进行平滑
+            nn.Conv2d(self.hidden_dim, self.hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(self.hidden_dim),
+            nn.PReLU(),
+            # 降维到 1 个通道，生成 0~1 的可信度概率掩码 (Attention Map)
+            nn.Conv2d(self.hidden_dim, 1, kernel_size=1),
+            nn.Sigmoid() 
+        )
 
+    def compute(self, Y, azi, ele=None, pairs=None):
+        if not self.enabled:
+            return None
+            
+        target_pairs = self._get_pairs(pairs)
+        B, M, F_dim, T_dim = Y.shape
+        
+        # --- A. 获取 Mixture 的观测证据 (IPD) ---
+        ipd_list = []
+        for (i, j) in target_pairs:
+            diff = Y[:, i].angle() - Y[:, j].angle()
+            diff = torch.remainder(diff + math.pi, 2 * math.pi) - math.pi
+            ipd_list.append(diff)
+        IPD = torch.stack(ipd_list, dim=1) # (B, P, F, T)
+        
+        # 展开为 cos 和 sin -> (B, 2P, F, T)
+        mix_feat = torch.cat([torch.cos(IPD), torch.sin(IPD)], dim=1)
+        
+        # --- B. 获取 DOA 的物理提示 (TPD) ---
+        TPD = self._compute_tpd(azi, ele, F_dim, target_pairs) # (B, P, F, 1)
+        # 展开为 cos 和 sin -> (B, 2P, F, 1)
+        doa_feat = torch.cat([torch.cos(TPD), torch.sin(TPD)], dim=1)
+        
+        # --- C. 深度交互 (Interaction) ---
+        # 映射到相同的隐藏特征空间
+        M_x = self.proj_mix(mix_feat) # (B, hidden_dim, F, T)
+        M_c = self.proj_doa(doa_feat) # (B, hidden_dim, F, 1)
+        
+        # 点积/相乘交互 (M_c 会在 T 维度自动 Broadcasting)
+        # 这捕捉了观测 IPD 与目标 TPD 在特征空间的匹配程度
+        interaction = M_x * M_c 
+        
+        # 生成后验掩码 z (B, 1, F, T)
+        z_mask = self.posterior_refiner(interaction)
+        
+        return z_mask
+
+    def post(self, mix_repr, spatial_repr):
+        if spatial_repr is None:
+            return mix_repr
+            
+        if self.fusion == "multiply":
+            # mix_repr 可能是 (B, C, F, T)，spatial_repr 是 (B, 1, F, T)
+            # Broadcasting 自动生效，充当门控机制
+            return mix_repr * spatial_repr
+            
+        elif self.fusion == "concat":
+            # 作为一个额外的 1 通道特征拼接到主特征上
+            return torch.cat([mix_repr, spatial_repr], dim=1)
+            
+        return mix_repr
 
 class SpatialFrontend(nn.Module):
     def __init__(self, config):
@@ -223,6 +313,11 @@ class SpatialFrontend(nn.Module):
                     "cyc_dimension": 40,
                     "use_ele": True,
                     "out_channel": 1
+                },
+                "posterior_mask": {
+                    "enabled": True,
+                    "hidden_dim": 32,
+                    "fusion_type": "multiply" # 推荐使用 multiply 作为门控
                 }
             }
         }
@@ -263,6 +358,9 @@ class SpatialFrontend(nn.Module):
             
         if feat_cfg['cyc_doaemb']['enabled']:
             self.features['cyc_doaemb']= CycEncoder(feat_cfg['cyc_doaemb'])
+        if feat_cfg.get('posterior_mask', {}).get('enabled', False):
+            pm_cfg = deep_update({'pairs': self.default_pairs}, feat_cfg['posterior_mask'])
+            self.features['posterior_mask'] = PosteriorMaskFeature(pm_cfg, geometry_ctx)    
 
     def compute_all(self, Y, azi, ele=None, pairs=None):
         if ele is None:

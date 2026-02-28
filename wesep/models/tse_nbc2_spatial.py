@@ -47,7 +47,7 @@ class TSE_NBC2_SPATIAL(nn.Module):
                     "use_ele": True,
                     "out_channel": 1, # only use when concat
                     "fusion_type": "multiply" # concat or multiply
-                }
+                },
             }
         }
         self.spatial_configs = deep_update(spatial_configs, config.get('spatial', {}))

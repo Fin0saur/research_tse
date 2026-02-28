@@ -36,7 +36,7 @@ whole_utt: True
 #   loss_weight: [[1.0],[1.0]]
 
 model:
-  tse_model: TSE_NEW
+  tse_model: TSE_NBC2_SPATIAL
 model_args:
   tse_model:
     win: 512         
@@ -68,25 +68,21 @@ model_args:
         - [ 0.05,        0.0, 0.0]  # Mic 3 (最右)
       features:
         ipd: 
-          enabled: False        
+          enabled: True        
         cdf: 
-          enabled: False       
+          enabled: True       
         sdf: 
-          enabled: False       
+          enabled: True       
         delta_stft: 
-          enabled: False
+          enabled: True
         cyc_doaemb:
-          enabled: False
+          enabled: True
           cyc_alpha: 20
           cyc_dimension: 40
           use_ele: True
           out_channel: 1          
           fusion_type: multiply
-        posterior_mask:
-          enabled: True
-          hidden_dim: 32
-          fusion_type: multiply
-          num_encoder: 1
+        
 
 # find_unused_parameters: True
 
