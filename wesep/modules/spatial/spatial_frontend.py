@@ -226,8 +226,9 @@ class DSTFTFeature(BaseSpatialFeature):
 
 class PosteriorMaskFeature(BaseSpatialFeature):
     """
-    深度后验交互特征 (对应方案一)
-    使用 TPD (具备频率维度) 作为 DOA 的表征，与 IPD 在特征空间进行相似度交互，生成软掩码。
+    深度后验交互特征 (V2: IPD + \Delta STFT 双流架构)
+    将观测到的 相位差(IPD) 和 归一化复数差(\Delta STFT) 分别与目标 TPD 进行特征交互，
+    融合多维度空间线索生成高精度的软掩码。
     """
     def __init__(self, config, geometry_ctx=None):
         super().__init__(config, geometry_ctx)
@@ -236,31 +237,43 @@ class PosteriorMaskFeature(BaseSpatialFeature):
         self.hidden_dim = config.get('hidden_dim', 32)
         self.fusion = config.get('fusion_type', 'multiply') # 支持 'multiply' 或 'concat'
         
-        # 输入通道为 pairs 的 2 倍 (因为我们要输入 cos(相位) 和 sin(相位) 避免相位卷绕)
+        if not self.enabled:
+            return
+
         self.num_pairs = len(self._get_pairs(None))
-        in_channels = self.num_pairs * 2
+        in_channels = self.num_pairs * 2  # IPD(cos,sin) 或 Delta(real,imag) 都是 2P
         
-        # 1. Mixture Encoder (处理实际观测到的 IPD)
-        self.proj_mix = nn.Sequential(
+        # ==================== 分支 1: IPD 交互流 ====================
+        self.proj_mix_ipd = nn.Sequential(
+            nn.Conv2d(in_channels, self.hidden_dim, kernel_size=1),
+            nn.BatchNorm2d(self.hidden_dim),
+            nn.PReLU()
+        )
+        self.proj_doa_ipd = nn.Sequential(
             nn.Conv2d(in_channels, self.hidden_dim, kernel_size=1),
             nn.BatchNorm2d(self.hidden_dim),
             nn.PReLU()
         )
         
-        # 2. DOA Encoder (处理带有频率维度的理论 TPD)
-        self.proj_doa = nn.Sequential(
+        # ==================== 分支 2: \Delta STFT 交互流 ====================
+        self.proj_mix_delta = nn.Sequential(
+            nn.Conv2d(in_channels, self.hidden_dim, kernel_size=1),
+            nn.BatchNorm2d(self.hidden_dim),
+            nn.PReLU()
+        )
+        self.proj_doa_delta = nn.Sequential(
             nn.Conv2d(in_channels, self.hidden_dim, kernel_size=1),
             nn.BatchNorm2d(self.hidden_dim),
             nn.PReLU()
         )
         
-        # 3. 后验掩码生成器 (处理交互后的特征)
+        # ==================== 后验掩码融合生成器 ====================
+        # 接收双流交互的拼接特征 (hidden_dim * 2)
         self.posterior_refiner = nn.Sequential(
-            # 使用 3x3 卷积在时频域进行平滑
-            nn.Conv2d(self.hidden_dim, self.hidden_dim, kernel_size=3, padding=1),
+            nn.Conv2d(self.hidden_dim * 2, self.hidden_dim, kernel_size=3, padding=1),
             nn.BatchNorm2d(self.hidden_dim),
             nn.PReLU(),
-            # 降维到 1 个通道，生成 0~1 的可信度概率掩码 (Attention Map)
+            # 降维到 1 个通道，生成 0~1 的可信度概率掩码
             nn.Conv2d(self.hidden_dim, 1, kernel_size=1),
             nn.Sigmoid() 
         )
@@ -271,34 +284,56 @@ class PosteriorMaskFeature(BaseSpatialFeature):
             
         target_pairs = self._get_pairs(pairs)
         B, M, F_dim, T_dim = Y.shape
+        eps = 1e-8
         
-        # --- A. 获取 Mixture 的观测证据 (IPD) ---
         ipd_list = []
+        delta_real = []
+        delta_imag = []
+        
+        # --- 1. 提取观测证据 (IPD & 归一化 \Delta STFT) ---
         for (i, j) in target_pairs:
-            diff = Y[:, i].angle() - Y[:, j].angle()
-            diff = torch.remainder(diff + math.pi, 2 * math.pi) - math.pi
-            ipd_list.append(diff)
+            # 提取 IPD
+            diff_angle = Y[:, i].angle() - Y[:, j].angle()
+            diff_angle = torch.remainder(diff_angle + math.pi, 2 * math.pi) - math.pi
+            ipd_list.append(diff_angle)
+            
+            # 提取 \Delta STFT 并进行能量归一化 (极其关键，消除绝对音量影响)
+            diff_stft = Y[:, i] - Y[:, j]
+            mag_sum = Y[:, i].abs() + Y[:, j].abs() + eps
+            norm_diff_stft = diff_stft / mag_sum
+            
+            delta_real.append(norm_diff_stft.real)
+            delta_imag.append(norm_diff_stft.imag)
+            
         IPD = torch.stack(ipd_list, dim=1) # (B, P, F, T)
+        mix_feat_ipd = torch.cat([torch.cos(IPD), torch.sin(IPD)], dim=1) # (B, 2P, F, T)
         
-        # 展开为 cos 和 sin -> (B, 2P, F, T)
-        mix_feat = torch.cat([torch.cos(IPD), torch.sin(IPD)], dim=1)
+        mix_feat_delta = torch.cat([
+            torch.stack(delta_real, dim=1), 
+            torch.stack(delta_imag, dim=1)
+        ], dim=1) # (B, 2P, F, T)
         
-        # --- B. 获取 DOA 的物理提示 (TPD) ---
+        # --- 2. 提取物理提示 (TPD 作为 DOA 表征) ---
         TPD = self._compute_tpd(azi, ele, F_dim, target_pairs) # (B, P, F, 1)
-        # 展开为 cos 和 sin -> (B, 2P, F, 1)
-        doa_feat = torch.cat([torch.cos(TPD), torch.sin(TPD)], dim=1)
+        doa_feat = torch.cat([torch.cos(TPD), torch.sin(TPD)], dim=1) # (B, 2P, F, 1)
         
-        # --- C. 深度交互 (Interaction) ---
-        # 映射到相同的隐藏特征空间
-        M_x = self.proj_mix(mix_feat) # (B, hidden_dim, F, T)
-        M_c = self.proj_doa(doa_feat) # (B, hidden_dim, F, 1)
+        # --- 3. 独立深度交互 (Independent Interaction) ---
+        # IPD 流交互
+        M_x_ipd = self.proj_mix_ipd(mix_feat_ipd)
+        M_c_ipd = self.proj_doa_ipd(doa_feat)
+        interaction_ipd = M_x_ipd * M_c_ipd  # (B, hidden_dim, F, T)
         
-        # 点积/相乘交互 (M_c 会在 T 维度自动 Broadcasting)
-        # 这捕捉了观测 IPD 与目标 TPD 在特征空间的匹配程度
-        interaction = M_x * M_c 
+        # \Delta STFT 流交互
+        M_x_delta = self.proj_mix_delta(mix_feat_delta)
+        M_c_delta = self.proj_doa_delta(doa_feat)
+        interaction_delta = M_x_delta * M_c_delta  # (B, hidden_dim, F, T)
         
-        # 生成后验掩码 z (B, 1, F, T)
-        z_mask = self.posterior_refiner(interaction)
+        # --- 4. 多级特征融合与掩码生成 ---
+        # 拼接双流交互特征: (B, hidden_dim * 2, F, T)
+        fused_interaction = torch.cat([interaction_ipd, interaction_delta], dim=1)
+        
+        # 生成最终的后验掩码 z (B, 1, F, T)
+        z_mask = self.posterior_refiner(fused_interaction)
         
         return z_mask
 
@@ -307,12 +342,8 @@ class PosteriorMaskFeature(BaseSpatialFeature):
             return mix_repr
             
         if self.fusion == "multiply":
-            # mix_repr 可能是 (B, C, F, T)，spatial_repr 是 (B, 1, F, T)
-            # Broadcasting 自动生效，充当门控机制
             return mix_repr * spatial_repr
-            
         elif self.fusion == "concat":
-            # 作为一个额外的 1 通道特征拼接到主特征上
             return torch.cat([mix_repr, spatial_repr], dim=1)
             
         return mix_repr

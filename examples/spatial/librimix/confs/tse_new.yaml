@@ -68,13 +68,13 @@ model_args:
         - [ 0.05,        0.0, 0.0]  # Mic 3 (最右)
       features:
         ipd: 
-          enabled: True        
+          enabled: False        
         cdf: 
-          enabled: True       
+          enabled: False       
         sdf: 
-          enabled: True       
+          enabled: False       
         delta_stft: 
-          enabled: True
+          enabled: False
         posterior_mask: 
           enabled: True
           hidden_dim: 32
@@ -100,7 +100,7 @@ optimizer_args:
     weight_decay: 0.0001
 
 clip_grad: 5.0
-save_epoch_interval: 1
+save_epoch_interval: 3
 
 scheduler:
   tse_model: ExponentialDecrease
