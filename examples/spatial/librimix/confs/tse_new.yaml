@@ -1,5 +1,5 @@
 dataloader_args:
-  batch_size: 1 #RTX2080 1, V100: 8, A800: 16
+  batch_size: 2 #RTX2080 1, V100: 8, A800: 16
   drop_last: true
   num_workers: 12
   pin_memory: true
@@ -68,18 +68,29 @@ model_args:
         - [ 0.05,        0.0, 0.0]  # Mic 3 (最右)
       features:
         ipd: 
-          enabled: False        
+          enabled: True        
         cdf: 
-          enabled: False       
+          enabled: True       
         sdf: 
-          enabled: False       
+          enabled: True       
         delta_stft: 
-          enabled: False
-        posterior_mask: 
           enabled: True
+        posterior_mask: 
+          enabled: False
           hidden_dim: 32
           fusion_type: multiply
           num_encoder: 1
+        latent_mixture_adaptive:
+          enabled: False
+          num_encoder: 1
+          hidden_dim: 64
+          enc_channels: 96       # 极其重要：必须与上方 separator 的 dim_hidden (96) 保持完全一致！
+          fusion_type: multiply  # 作为门控乘法注入到 NBC2 隐藏层
+          use_ele: True
+          encoding_config:
+            encoding: cyc        # 使用循环位置编码
+            cyc_alpha: 20
+            cyc_dimension: 40
                 
 
 # find_unused_parameters: True

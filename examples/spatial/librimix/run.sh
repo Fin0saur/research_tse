@@ -18,10 +18,10 @@ Libri2Mix_dir=/root/Spatial_librimix #/YourPATH/librimix/Libri2Mix_spatial
 mix_data_path="${Libri2Mix_dir}/wav${fs}/${min_max}"
 
 # Training related
-gpus="[0,1,2,3,4,5]"
+gpus="[0,1,2,3]"
 config=confs/tse_new.yaml
 data_config=confs/create_dataset.yaml
-exp_dir=exp/TSE_new1
+exp_dir=exp/TSE_baseline
 if [ -z "${config}" ] && [ -f "${exp_dir}/config.yaml" ]; then
   config="${exp_dir}/config.yaml"
 fi
@@ -36,18 +36,18 @@ use_dnsmos=true
 dnsmos_use_gpu=true
 
 # Model average related
-num_avg=10
+num_avg=3
 
 . tools/parse_options.sh || exit 1
 
 
-if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
+if [ ${stage} -le 0 ] && [ ${stop_stage} -ge 0 ]; then
   echo "Generate datasets ..."
   python ./local/create_dataset_spatial.py --config ${data_config} \
     --stage "all"
 fi
 
-if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
+if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
   echo "Prepare datasets ..."
   ./local/prepare_data.sh --mix_data_path ${mix_data_path} \
     --data ${data} \
@@ -73,7 +73,7 @@ data=${data}/${noise_type}
 #   done
 # fi
 
-if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
+if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then
   echo "Start training ..."
   num_gpus=$(echo $gpus | awk -F ',' '{print NF}')
   if [ -z "${checkpoint}" ] && [ -f "${exp_dir}/models/latest_checkpoint.pt" ]; then
@@ -96,7 +96,7 @@ if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
     ${checkpoint:+--checkpoint $checkpoint}
 fi
 
-if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
+if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
   echo "Do model average ..."
   avg_model=$exp_dir/models/avg_best_model.pt
   python wesep/bin/average_model.py \
@@ -104,13 +104,13 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
     --src_path $exp_dir/models \
     --num ${num_avg} \
     --mode best \
-    --epochs "138,141"
+    --epochs "66,69,72"
 fi
 if [ -z "${checkpoint}" ] && [ -f "${exp_dir}/models/avg_best_model.pt" ]; then
   checkpoint="${exp_dir}/models/avg_best_model.pt"
 fi
 
-if [ ${stage} -le 6 ] && [ ${stop_stage} -ge 6 ]; then
+if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
   echo "Start inferencing ..."
   python wesep/bin/infer.py --config $config \
     --fs ${fs} \
@@ -124,7 +124,7 @@ if [ ${stage} -le 6 ] && [ ${stop_stage} -ge 6 ]; then
     ${checkpoint:+--checkpoint $checkpoint}
 fi
 
-if [ ${stage} -le 7 ] && [ ${stop_stage} -ge 7 ]; then
+if [ ${stage} -le 6 ] && [ ${stop_stage} -ge 6 ]; then
   echo "Start scoring ..."
   ./tools/score.sh --dset "${data}/test" \
     --exp_dir "${exp_dir}" \

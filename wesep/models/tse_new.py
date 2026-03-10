@@ -32,28 +32,33 @@ class TSE_NEW(nn.Module):
             },
             "pairs": [[0, 1], [1, 2], [2, 3], [0, 3]], 
             "features": {
-                "ipd": {
-                    "enabled": False, 
-                    "num_encoder": 1
-                },
-                "cdf": {
-                    "enabled": False, 
-                    "num_encoder": 1
-                },
-                "sdf": {
-                    "enabled": False, 
-                    "num_encoder": 1
-                },
-                "delta_stft": {
-                    "enabled": False, 
-                    "num_encoder": 1
-                },
-                # >>> 新增：深度后验掩码配置 <<<
+                "ipd": {"enabled": False, "num_encoder": 1},
+                "cdf": {"enabled": False, "num_encoder": 1},
+                "sdf": {"enabled": False, "num_encoder": 1},
+                "delta_stft": {"enabled": False, "num_encoder": 1},
+                
+                # 深度后验掩码配置 (早期物理融合)
                 "posterior_mask": {
                     "enabled": True, 
                     "hidden_dim": 32,
-                    "fusion_type": "multiply", # 作为门控乘法注入
+                    "fusion_type": "multiply", 
                     "num_encoder": 1
+                },
+                
+                # >>> 新增：隐空间混合自适应帧级特征配置 (晚期动态融合) <<<
+                "latent_mixture_adaptive": {
+                    "enabled": True,  # 开启该功能
+                    "num_encoder": 1,
+                    "hidden_dim": 64,
+                    # 注意：必须与下方 sep_configs 的 dim_hidden 保持绝对一致！
+                    "enc_channels": 96, 
+                    "fusion_type": "multiply",
+                    "encoding_config": {
+                        "encoding": "cyc",
+                        "cyc_alpha": 20,
+                        "cyc_dimension": 40
+                    },
+                    "use_ele": True
                 }
             }
         }
@@ -83,6 +88,10 @@ class TSE_NEW(nn.Module):
         )
         self.sep_configs = deep_update(sep_configs, config.get('separator', {}))
         
+        # 工程保险丝：强制同步 latent_mixture_adaptive 的通道数与 NBC2Encoder 维度一致
+        if self.spatial_configs["features"].get("latent_mixture_adaptive", {}).get("enabled", False):
+            self.spatial_configs["features"]["latent_mixture_adaptive"]["enc_channels"] = self.sep_configs["dim_hidden"]
+        
         # --- 3. Dynamic Input Size Calculation ---
         ### spec_feat dim calculation
         n_pairs = len(self.spatial_configs['pairs'])
@@ -98,7 +107,7 @@ class TSE_NEW(nn.Module):
         if self.spatial_configs["features"]["delta_stft"]["enabled"]:
             self.sep_configs["spec_dim"] += 2 * n_pairs * self.spatial_configs["features"]["delta_stft"]["num_encoder"]
             
-        # 注意：posterior_mask 使用 multiply 注入主干的隐藏层，不需要增加 spec_dim
+        # 注意：posterior_mask 和 latent_mixture_adaptive 都是内部门控操作，不改变输入通道数
 
         # --- 5. Instantiate Modules ---
         self.sep_model = NBC2(**self.sep_configs)
@@ -120,7 +129,6 @@ class TSE_NEW(nn.Module):
         spec_norm, norm_scale = self.A_norm(spec)
         
         # S3. Concat real and imag, split to subbands
-        # Spectral: (B, 2, F, T) or (B, C, F, T)
         spec_feat = None
         if self.full_input:
             spec_feat = torch.cat([spec_norm.real, spec_norm.imag], dim=1)
@@ -128,7 +136,7 @@ class TSE_NEW(nn.Module):
             spec_feat = torch.stack([spec_norm[:, 0].real, spec_norm[:, 0].imag], dim=1)
         
         #######################################################
-        # Spatio-temporal Features
+        # Level 1: 早期物理特征融合 (Early Fusion)
         if self.spatial_configs['features']['ipd']['enabled']:
             ipd_feature = self.spatial_ft.features['ipd'].compute(Y=spec_norm)
             spec_feat = self.spatial_ft.features['ipd'].post(spec_feat, ipd_feature)
@@ -145,25 +153,42 @@ class TSE_NEW(nn.Module):
             dstft_feature = self.spatial_ft.features['delta_stft'].compute(Y=spec_norm)
             spec_feat = self.spatial_ft.features['delta_stft'].post(spec_feat, dstft_feature)
             
-        # >>> 计算深度后验掩码 (z_mask) <<<
+        # 计算深度后验掩码 (z_mask)
         posterior_mask_feature = None
         if self.spatial_configs['features'].get('posterior_mask', {}).get('enabled', False):
             posterior_mask_feature = self.spatial_ft.features['posterior_mask'].compute(
                 Y=spec_norm, azi=azi_rad, ele=ele_rad
             )
+
+        # >>> 新增：提前提取静态全局 DOA 向量 (为晚期融合做准备) <<<
+        latent_spatial_repr = None
+        if self.spatial_configs['features'].get('latent_mixture_adaptive', {}).get('enabled', False):
+            # 注意：这里的 compute 只用到 azi 和 ele，Y 可以置空
+            latent_spatial_repr = self.spatial_ft.features['latent_mixture_adaptive'].compute(
+                Y=None, azi=azi_rad, ele=ele_rad
+            )
         ####################################################
         
+        # 主干 Encoder 处理：升维、平滑、提炼高级声学场信息
         encode_features = self.sep_model.encoder(spec_feat) # Conv: (B, dim_hidden, F, T)
         
-        # >>> 应用深度后验掩码门控 (Early Bottleneck Gating) <<<
+        # 应用深度后验掩码门控 (Early Bottleneck Gating)
         if posterior_mask_feature is not None:
-            # posterior_mask_feature 形状为 (B, 1, F, T)，直接利用广播机制与 encode_features 相乘
             encode_features = self.spatial_ft.features['posterior_mask'].post(
                 encode_features, posterior_mask_feature
             )
         
-        for idx, m in enumerate(self.sep_model.sa_layers): # nbc2_block
-            # cyc_doaemb ele-multiply
+        # >>> 新增：Level 2 晚期隐空间动态特征门控 (Late / Latent Gating) <<<
+        # 此时的 encode_features 包含了最优的声学观测，将送入 post 进行帧级掩码提炼并直接乘以原特征
+        if latent_spatial_repr is not None:
+            encode_features = self.spatial_ft.features['latent_mixture_adaptive'].post(
+                mix_repr=encode_features, 
+                spatial_repr=latent_spatial_repr
+            )
+        ####################################################
+        
+        # 送入彼此隔离的窄带处理核心块
+        for idx, m in enumerate(self.sep_model.sa_layers): 
             encode_features, _ = m(encode_features)
         
         est_spec_feat = self.sep_model.decoder(encode_features)

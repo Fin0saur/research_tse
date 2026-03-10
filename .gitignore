@@ -39,3 +39,6 @@ raw_wav
 tensorboard
 # **/*build*
 wespeaker_models
+
+# exp
+*.pt

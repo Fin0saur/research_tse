@@ -15,6 +15,7 @@ from wesep.dataset.collate import (
     tse_collate_fn,
     AUX_KEY_MAP,
 )
+import numpy as np
 from wesep.models import get_model
 from wesep.utils.checkpoint import load_pretrained_model
 from wesep.utils.score import cal_SISNRi
@@ -24,6 +25,7 @@ from wesep.utils.utils import (
     parse_config_or_kwargs,
     set_seed,
 )
+from wesep.utils.file_utils import load_yaml
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 os.environ["TORCH_USE_CUDA_DSA"] = "1"
@@ -82,8 +84,7 @@ def infer(config="confs/conf.yaml", **kwargs):
         configs["test_data"],
         configs["dataset_args"],
         state="test",
-        whole_utt=configs.get("whole_utt", True),
-        repeat_dataset=configs.get("repeat_dataset", False),
+        repeat_dataset=False,
         cues_yaml=configs.get("test_cues", None),
     )
     test_collect_keys = build_collect_keys(
@@ -96,7 +97,7 @@ def infer(config="confs/conf.yaml", **kwargs):
         batch_size=1,
         collate_fn=lambda batch: tse_collate_fn(batch, test_collect_keys))
 
-    with open(configs["val_samples"], "r", encoding="utf-8") as f:
+    with open(configs["test_data"], "r", encoding="utf-8") as f:
         test_iter = sum(1 for _ in f)
     logger.info("test number: {}".format(test_iter))
 
@@ -137,16 +138,21 @@ def infer(config="confs/conf.yaml", **kwargs):
             ref = target.cpu().numpy()
             ests = outputs
             mix = mix.cpu().numpy()
-
+                        
+            if mix.ndim == 3:
+                mix_ref = mix[:, 0, :]
+                mix_ref = np.expand_dims(mix_ref,axis=1)
+            else:
+                mix_ref = mix
             if ests[0].size != ref[0].size:
-                end = min(ests[0].size, ref[0].size, mix[0].size)
+                end = min(ests[0].size, ref[0].size, mix_ref[0].size)
                 ests_1 = ests[0][:end]
                 ref_1 = ref[0][:end]
-                mix_1 = mix[0][:end]
+                mix_1 = mix_ref[0][:end] 
                 SISNR1, delta1 = cal_SISNRi(ests_1, ref_1, mix_1)
             else:
-                SISNR1, delta1 = cal_SISNRi(ests[0], ref[0], mix[0])
-
+                SISNR1, delta1 = cal_SISNRi(ests[0], ref[0], mix_ref[0])
+            
             logger.info(
                 "Num={} | Utt={} | Target speaker={} | SI-SNR={:.2f} | SI-SNRi={:.2f}"
                 .format(total_cnt + 1, key[0], spk[0], SISNR1, delta1))
@@ -157,13 +163,14 @@ def infer(config="confs/conf.yaml", **kwargs):
                 accept_cnt += 1
 
             if ests[1].size != ref[1].size:
-                end = min(ests[1].size, ref[1].size, mix[1].size)
+                end = min(ests[1].size, ref[1].size, mix_ref[1].size)
                 ests_2 = ests[1][:end]
                 ref_2 = ref[1][:end]
-                mix_2 = mix[1][:end]
+                mix_2 = mix_ref[1][:end]
                 SISNR2, delta2 = cal_SISNRi(ests_2, ref_2, mix_2)
             else:
-                SISNR2, delta2 = cal_SISNRi(ests[1], ref[1], mix[1])
+                SISNR2, delta2 = cal_SISNRi(ests[1], ref[1], mix_ref[1])
+                
             logger.info(
                 "Num={} | Utt={} | Target speaker={} | SI-SNR={:.2f} | SI-SNRi={:.2f}"
                 .format(total_cnt + 1, key[1], spk[1], SISNR2, delta2))

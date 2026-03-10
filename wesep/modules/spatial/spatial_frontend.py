@@ -110,7 +110,118 @@ class InitStatesFeature(BaseSpatialFeature):
 
     def post(self, mix_repr, spatial_repr):
         return mix_repr
+class LatentMixtureAdaptiveFeature(BaseSpatialFeature):
+    """
+    隐空间混合自适应帧级特征 (Option 2: Post-Encoder Latent Fusion)
+    - compute: 仅负责提取纯净的静态 DOA 全局编码。
+    - post: 接收主干 Encoder 输出的深层声学特征 (mix_repr)，通过全连接层精准解码 F 轴的物理模式，
+            随后与 DOA 拼接，通过轻量级 1D-CNN 提炼出 (B, C, 1, T) 的动态门控掩码。
+    """
+    def __init__(self, config, geometry_ctx=None):
+        super().__init__(config, geometry_ctx)
         
+        self.enabled = config.get('enabled', False)
+        if not self.enabled:
+            return
+
+        self.hidden_dim = config.get('hidden_dim', 64)
+        self.enc_channels = config.get('enc_channels', 192) 
+        self.fusion_type = config.get('fusion_type', 'multiply')
+        self.use_ele = config.get('use_ele', False)
+        
+        # 巧妙地从 geometry_ctx 中获取 F 维度的大小 (例如 257)
+        self.f_dim = geometry_ctx['omega_over_c'].shape[0] if geometry_ctx is not None else 257
+        
+        # 1. DOA 编码器初始化
+        encoding_cfg = config.get("encoding_config", {})
+        self.encoder, self.enc_dim = PosEncodingFactory.create(encoding_cfg, self.use_ele)
+        self.encoding_type = encoding_cfg.get("encoding", "cyc")
+        
+        # ==========================================================
+        # ★ 核心升级: 频域物理模式解码器 (Frequency Pattern Decoder) ★
+        # 不再用暴力的 mean()，而是用 Linear 层保留频率与相位的物理规律映射
+        # ==========================================================
+        self.freq_proj = nn.Sequential(
+            nn.Linear(self.f_dim, self.hidden_dim),
+            nn.PReLU(),
+            nn.Linear(self.hidden_dim, 1) # 最终压缩为一个标量特征
+        )
+        
+        # 2. 神经网络提炼器 (The SubNetwork) —— 部署在 post 阶段
+        self.dynamic_generator = nn.Sequential(
+            nn.Conv1d(self.enc_channels + self.enc_dim, self.hidden_dim, kernel_size=1),
+            nn.BatchNorm1d(self.hidden_dim),
+            nn.PReLU(),
+            nn.Conv1d(self.hidden_dim, self.enc_channels, kernel_size=1),
+            nn.Sigmoid() if self.fusion_type == 'multiply' else nn.Identity()
+        )
+
+    def compute(self, Y, azi, ele=None, pairs=None):
+        """ 仅提供纯净的、静态的“目标空间锚点” """
+        if not self.enabled:
+            return None
+            
+        if azi.dim() == 1: azi = azi.unsqueeze(1)
+        if ele is not None and ele.dim() == 1: ele = ele.unsqueeze(1)
+        
+        if self.encoding_type == "exp":
+            doa_enc = self.encoder(azi, ele) 
+        else:
+            doa_enc = self.encoder(azi)
+            if self.use_ele and ele is not None:
+                ele_input = torch.abs(ele) if self.encoding_type in ["oh", "onehot"] else ele
+                doa_enc = torch.cat([doa_enc, self.encoder(ele_input)], dim=-1)
+                
+        return doa_enc.squeeze(1)
+
+    def post(self, mix_repr, spatial_repr):
+        """ 核心战场：跨模态动态生成与提炼 """
+        if spatial_repr is None:
+            return mix_repr
+            
+        B, C_enc, F_dim, T_dim = mix_repr.shape
+        
+        if C_enc != self.enc_channels:
+            raise ValueError(f"Feature C_enc ({C_enc}) != Config enc_channels ({self.enc_channels})")
+        if F_dim != self.f_dim:
+            raise ValueError(f"Input F_dim ({F_dim}) != Initialized f_dim ({self.f_dim})")
+
+        # ==========================================================
+        # Step 1: 频域物理模式解码 (Frequency Pattern Decoding)
+        # ==========================================================
+        # (B, C_enc, F_dim, T_dim) -> (B, C_enc, T_dim, F_dim)
+        scene_t = mix_repr.permute(0, 1, 3, 2)
+        
+        # 让网络审视完整的 F 轴分布规律: (B, C_enc, T_dim, F_dim) -> (B, C_enc, T_dim, 1)
+        scene_t = self.freq_proj(scene_t)
+        
+        # 丢掉最后一维: (B, C_enc, T_dim)
+        scene_t = scene_t.squeeze(-1)
+        
+        # ==========================================================
+        # Step 2: 提取全局空间先验，并沿时间轴张成矩阵
+        # ==========================================================
+        doa_t = spatial_repr.unsqueeze(-1).expand(-1, -1, T_dim)
+        
+        # ==========================================================
+        # Step 3: 神经网络跨模态提炼 
+        # ==========================================================
+        combined_feat = torch.cat([scene_t, doa_t], dim=1)
+        dynamic_mask = self.dynamic_generator(combined_feat)
+        dynamic_mask = dynamic_mask.unsqueeze(2) # (B, C_enc, 1, T)
+        
+        # ==========================================================
+        # Step 4: 应用门控，触发广播机制
+        # ==========================================================
+        if self.fusion_type == "multiply":
+            return mix_repr * dynamic_mask
+        elif self.fusion_type == "add":
+            return mix_repr + dynamic_mask
+        elif self.fusion_type == "concat":
+            mask_expand = dynamic_mask.expand(-1, -1, F_dim, -1)
+            return torch.cat([mix_repr, mask_expand], dim=1)
+            
+        return mix_repr
 class TimeVariantMultiplyFeature(BaseSpatialFeature): 
     def __init__(self, config, geometry_ctx=None):
         super().__init__(config, geometry_ctx)
@@ -361,56 +472,43 @@ class SpatialFrontend(nn.Module):
                 "c": 343.0,
                 "mic_spacing": 0.033333,
                 "mic_coords": [
-                    [-0.05,        0.0, 0.0],  # Mic 0
-                    [-0.01666667,  0.0, 0.0],  # Mic 1
-                    [ 0.01666667,  0.0, 0.0],  # Mic 2
-                    [ 0.05,        0.0, 0.0],  # Mic 3
+                    [-0.05,        0.0, 0.0],
+                    [-0.01666667,  0.0, 0.0],
+                    [ 0.01666667,  0.0, 0.0],
+                    [ 0.05,        0.0, 0.0],
                 ],
             },
             "pairs": [[0, 1], [1, 2], [2, 3], [0, 3]], 
             "features": {
-                "ipd": {
-                    "enabled": False, 
-                    "num_encoder": 1
-                },
-                "cdf": {
-                    "enabled": False, 
-                    "num_encoder": 1
-                },
-                "sdf": {
-                    "enabled": False, 
-                    "num_encoder": 1
-                },
-                "delta_stft": {
-                    "enabled": False, 
-                    "num_encoder": 1
-                },
+                "ipd": {"enabled": False, "num_encoder": 1},
+                "cdf": {"enabled": False, "num_encoder": 1},
+                "sdf": {"enabled": False, "num_encoder": 1},
+                "delta_stft": {"enabled": False, "num_encoder": 1},
                 "Multiply_emb": {
-                    "enabled": False,
-                    "num_encoder": 1,
-                    "encoding_config":{
-                        "encoding": "cyc",
-                        "cyc_alpha": 20,
-                        "cyc_dimension": 40,
-                    },
-                    "use_ele": True,
-                    "out_channel": 1
+                    "enabled": False, "num_encoder": 1,
+                    "encoding_config": {"encoding": "cyc", "cyc_alpha": 20, "cyc_dimension": 40},
+                    "use_ele": True, "out_channel": 1
                 },
                 "InitStates_emb": {  
-                    "enabled": False,
-                    "num_encoder": 1,
-                    "encoding_config":{
-                        "encoding": "oh",
-                        "emb_dim": 180,
-                    },
-                    "hidden_size_f": 256,
-                    "hidden_size_t": 256,
-                    "use_ele" : True
+                    "enabled": False, "num_encoder": 1,
+                    "encoding_config": {"encoding": "oh", "emb_dim": 180},
+                    "hidden_size_f": 256, "hidden_size_t": 256, "use_ele": True
                 },
                 "posterior_mask": {
-                    "enabled": True,
-                    "hidden_dim": 32,
-                    "fusion_type": "multiply" # 推荐使用 multiply 作为门控
+                    "enabled": True, "hidden_dim": 32, "fusion_type": "multiply"
+                },
+                "latent_mixture_adaptive": {
+                    "enabled": False,
+                    "num_encoder": 1,
+                    "hidden_dim": 64,
+                    "enc_channels": 192,  
+                    "fusion_type": "multiply",
+                    "encoding_config": {
+                        "encoding": "cyc",
+                        "cyc_alpha": 20,
+                        "cyc_dimension": 40
+                    },
+                    "use_ele": True
                 }
             }
         }
@@ -444,47 +542,55 @@ class SpatialFrontend(nn.Module):
             'delta_stft': DSTFTFeature,
             'Multiply_emb': TimeVariantMultiplyFeature,
             'InitStates_emb': InitStatesFeature,
-            'posterior_mask': PosteriorMaskFeature
+            'posterior_mask': PosteriorMaskFeature,
+            'latent_mixture_adaptive': LatentMixtureAdaptiveFeature 
         }
         
         for feat_name, sub_cfg in feat_cfg.items():
-            if not sub_cfg.get('enabled', False):
-                continue
-                
+            if not sub_cfg.get('enabled', False): continue
             if feat_name not in FEATURE_REGISTRY:
                 raise ValueError(f"Unknown spatial feature in config: {feat_name}")
                 
             num_encoder = sub_cfg.get('num_encoder', 1)
-            
             sub_cfg_with_pairs = deep_update({'pairs': self.default_pairs}, sub_cfg)
-            
             base_module = FEATURE_REGISTRY[feat_name](sub_cfg_with_pairs, geometry_ctx)
-            
             self.features[feat_name] = SpatialEncoderGroup(base_module, num_encoder)
         
     def compute_all(self, Y, azi, ele=None, pairs=None):
-        if ele is None:
-            ele = torch.zeros_like(azi)
-        
+        if ele is None: ele = torch.zeros_like(azi)
         out = {}
         for name, module in self.features.items():
             out[name] = module.compute(Y=Y, azi=azi, ele=ele, pairs=pairs)
-            
         return out
+
     def post_all(self, mix_repr, feature_dict):
+        """ 原有的全局一次性融合 """
         current_feat = mix_repr
-    
         feat_cfg = self.config['features']
-        
         for name in feat_cfg:
             sub_cfg = feat_cfg[name]
-            
-            if not sub_cfg.get('enabled', False):
-                continue
-            
+            if not sub_cfg.get('enabled', False): continue
             if name in self.features and name in feature_dict:
                 module = self.features[name]
                 raw_data = feature_dict[name]
                 current_feat = module.post(current_feat, raw_data)
+        return current_feat
         
+    # ==========================================================
+    # ★ 必须补上的分段融合拦截器 (核心) ★
+    # ==========================================================
+    def post_subset(self, mix_repr, feature_dict, target_features: list):
+        """
+        仅融合 target_features 列表里指定的特征，用于分段注入早期和晚期特征。
+        """
+        current_feat = mix_repr
+        feat_cfg = self.config['features']
+        
+        for name in target_features:
+            if name in feat_cfg and feat_cfg[name].get('enabled', False):
+                if name in self.features and name in feature_dict:
+                    module = self.features[name]
+                    raw_data = feature_dict[name]
+                    current_feat = module.post(current_feat, raw_data)
+                    
         return current_feat
