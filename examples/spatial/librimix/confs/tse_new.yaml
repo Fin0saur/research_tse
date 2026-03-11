@@ -1,5 +1,5 @@
 dataloader_args:
-  batch_size: 2 #RTX2080 1, V100: 8, A800: 16
+  batch_size: 1 #RTX2080 1, V100: 8, A800: 16
   drop_last: true
   num_workers: 12
   pin_memory: true
@@ -39,6 +39,7 @@ model:
   tse_model: TSE_NEW
 model_args:
   tse_model:
+    full_input: true
     win: 512         
     stride: 256      
     separator:
@@ -68,20 +69,21 @@ model_args:
         - [ 0.05,        0.0, 0.0]  # Mic 3 (最右)
       features:
         ipd: 
-          enabled: True        
+          enabled: False       
         cdf: 
-          enabled: True       
+          enabled: False      
         sdf: 
-          enabled: True       
+          enabled: False       
         delta_stft: 
-          enabled: True
+          enabled: False
         posterior_mask: 
           enabled: False
           hidden_dim: 32
           fusion_type: multiply
           num_encoder: 1
+          
         latent_mixture_adaptive:
-          enabled: False
+          enabled: False         # 测试 SoundCompass 时先把它关掉，保证变量唯一
           num_encoder: 1
           hidden_dim: 64
           enc_channels: 96       # 极其重要：必须与上方 separator 的 dim_hidden (96) 保持完全一致！
@@ -91,6 +93,16 @@ model_args:
             encoding: cyc        # 使用循环位置编码
             cyc_alpha: 20
             cyc_dimension: 40
+            
+        soundcompass_fusion:
+          enabled: True          # 开启测试
+          num_encoder: 1
+          enc_channels: 96       # 同样必须与 separator 的 dim_hidden 保持完全一致！
+          use_ele: True
+          encoding_config:
+            encoding: sh         # 使用球谐函数编码 (Spherical Harmonics)
+            sh_order: 5          # 论文中采用的 5 阶展开 (生成 72 维向量)
+        
                 
 
 # find_unused_parameters: True

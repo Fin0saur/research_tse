@@ -45,12 +45,11 @@ class TSE_NEW(nn.Module):
                     "num_encoder": 1
                 },
                 
-                # >>> 新增：隐空间混合自适应帧级特征配置 (晚期动态融合) <<<
+                # 隐空间混合自适应帧级特征配置 (晚期动态融合)
                 "latent_mixture_adaptive": {
-                    "enabled": True,  # 开启该功能
+                    "enabled": False,  
                     "num_encoder": 1,
                     "hidden_dim": 64,
-                    # 注意：必须与下方 sep_configs 的 dim_hidden 保持绝对一致！
                     "enc_channels": 96, 
                     "fusion_type": "multiply",
                     "encoding_config": {
@@ -59,6 +58,18 @@ class TSE_NEW(nn.Module):
                         "cyc_dimension": 40
                     },
                     "use_ele": True
+                },
+                
+                # >>> 新增：SoundCompass 完全体旁路融合模块 <<<
+                "soundcompass_fusion": {
+                    "enabled": False, 
+                    "num_encoder": 1, 
+                    "enc_channels": 96, # 动态保险丝会强制同步它
+                    "use_ele": True,
+                    "encoding_config": {
+                        "encoding": "sh", 
+                        "sh_order": 5
+                    }
                 }
             }
         }
@@ -88,9 +99,14 @@ class TSE_NEW(nn.Module):
         )
         self.sep_configs = deep_update(sep_configs, config.get('separator', {}))
         
-        # 工程保险丝：强制同步 latent_mixture_adaptive 的通道数与 NBC2Encoder 维度一致
+        # ==========================================================
+        # ★ 工程保险丝：强制同步晚期特征的通道数与 NBC2Encoder 维度一致
+        # ==========================================================
         if self.spatial_configs["features"].get("latent_mixture_adaptive", {}).get("enabled", False):
             self.spatial_configs["features"]["latent_mixture_adaptive"]["enc_channels"] = self.sep_configs["dim_hidden"]
+            
+        if self.spatial_configs["features"].get("soundcompass_fusion", {}).get("enabled", False):
+            self.spatial_configs["features"]["soundcompass_fusion"]["enc_channels"] = self.sep_configs["dim_hidden"]
         
         # --- 3. Dynamic Input Size Calculation ---
         ### spec_feat dim calculation
@@ -107,7 +123,7 @@ class TSE_NEW(nn.Module):
         if self.spatial_configs["features"]["delta_stft"]["enabled"]:
             self.sep_configs["spec_dim"] += 2 * n_pairs * self.spatial_configs["features"]["delta_stft"]["num_encoder"]
             
-        # 注意：posterior_mask 和 latent_mixture_adaptive 都是内部门控操作，不改变输入通道数
+        # 注意：posterior_mask, latent_mixture_adaptive, soundcompass_fusion 都是内部门控/旁路操作，不改变输入通道数
 
         # --- 5. Instantiate Modules ---
         self.sep_model = NBC2(**self.sep_configs)
@@ -160,12 +176,19 @@ class TSE_NEW(nn.Module):
                 Y=spec_norm, azi=azi_rad, ele=ele_rad
             )
 
-        # >>> 新增：提前提取静态全局 DOA 向量 (为晚期融合做准备) <<<
+        # 提前提取隐空间特征
         latent_spatial_repr = None
         if self.spatial_configs['features'].get('latent_mixture_adaptive', {}).get('enabled', False):
-            # 注意：这里的 compute 只用到 azi 和 ele，Y 可以置空
             latent_spatial_repr = self.spatial_ft.features['latent_mixture_adaptive'].compute(
                 Y=None, azi=azi_rad, ele=ele_rad
+            )
+            
+        # >>> 新增：提前提取 SoundCompass 旁路特征 (SPIN & DOA) <<<
+        sc_spatial_repr = None
+        if self.spatial_configs['features'].get('soundcompass_fusion', {}).get('enabled', False):
+            # 这里必须传入 Y=spec_norm 用于计算底层的 SPIN 矩阵
+            sc_spatial_repr = self.spatial_ft.features['soundcompass_fusion'].compute(
+                Y=spec_norm, azi=azi_rad, ele=ele_rad
             )
         ####################################################
         
@@ -178,12 +201,18 @@ class TSE_NEW(nn.Module):
                 encode_features, posterior_mask_feature
             )
         
-        # >>> 新增：Level 2 晚期隐空间动态特征门控 (Late / Latent Gating) <<<
-        # 此时的 encode_features 包含了最优的声学观测，将送入 post 进行帧级掩码提炼并直接乘以原特征
+        # >>> Level 2 晚期融合 A：隐空间动态特征门控 (Latent Gating) <<<
         if latent_spatial_repr is not None:
             encode_features = self.spatial_ft.features['latent_mixture_adaptive'].post(
                 mix_repr=encode_features, 
                 spatial_repr=latent_spatial_repr
+            )
+            
+        # >>> Level 2 晚期融合 B：SoundCompass FiLM 跨模态调制 <<<
+        if sc_spatial_repr is not None:
+            encode_features = self.spatial_ft.features['soundcompass_fusion'].post(
+                mix_repr=encode_features, 
+                spatial_repr=sc_spatial_repr
             )
         ####################################################
         

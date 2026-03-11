@@ -4,6 +4,7 @@ import math
 import copy
 from wesep.modules.common.deep_update import deep_update
 from wesep.modules.spatial.pos_encoding import PosEncodingFactory
+from wesep.modules.common.norm import AdaNorm2d
 
 class BaseSpatialFeature(nn.Module):
     def __init__(self, config, geometry_ctx=None):
@@ -112,10 +113,10 @@ class InitStatesFeature(BaseSpatialFeature):
         return mix_repr
 class LatentMixtureAdaptiveFeature(BaseSpatialFeature):
     """
-    隐空间混合自适应帧级特征 (Option 2: Post-Encoder Latent Fusion)
-    - compute: 仅负责提取纯净的静态 DOA 全局编码。
-    - post: 接收主干 Encoder 输出的深层声学特征 (mix_repr)，通过全连接层精准解码 F 轴的物理模式，
-            随后与 DOA 拼接，通过轻量级 1D-CNN 提炼出 (B, C, 1, T) 的动态门控掩码。
+    隐空间混合自适应帧级特征 (Fair Version aligned with DSENet)
+    - compute: 提取静态 DOA 编码，映射到声学隐空间。
+    - post: 接收主干声学特征 (mix_repr)，与 DOA 拼接后通过轻量网络提炼掩码。
+            ★ 公平性对齐: 放弃 Sigmoid，使用与 DSENet 完全一致的 PReLU 收尾，实现无界缩放。
     """
     def __init__(self, config, geometry_ctx=None):
         super().__init__(config, geometry_ctx)
@@ -129,7 +130,6 @@ class LatentMixtureAdaptiveFeature(BaseSpatialFeature):
         self.fusion_type = config.get('fusion_type', 'multiply')
         self.use_ele = config.get('use_ele', False)
         
-        # 巧妙地从 geometry_ctx 中获取 F 维度的大小 (例如 257)
         self.f_dim = geometry_ctx['omega_over_c'].shape[0] if geometry_ctx is not None else 257
         
         # 1. DOA 编码器初始化
@@ -137,82 +137,83 @@ class LatentMixtureAdaptiveFeature(BaseSpatialFeature):
         self.encoder, self.enc_dim = PosEncodingFactory.create(encoding_cfg, self.use_ele)
         self.encoding_type = encoding_cfg.get("encoding", "cyc")
         
-        # ==========================================================
-        # ★ 核心升级: 频域物理模式解码器 (Frequency Pattern Decoder) ★
-        # 不再用暴力的 mean()，而是用 Linear 层保留频率与相位的物理规律映射
-        # ==========================================================
+        # 2. 空间投影器 (Spatial Projector)
+        self.spatial_proj = nn.Sequential(
+            nn.Linear(self.enc_dim, self.hidden_dim),
+            nn.LayerNorm(self.hidden_dim),
+            nn.PReLU()
+        )
+
+        # 3. 频域物理模式解码器
         self.freq_proj = nn.Sequential(
             nn.Linear(self.f_dim, self.hidden_dim),
             nn.PReLU(),
-            nn.Linear(self.hidden_dim, 1) # 最终压缩为一个标量特征
+            nn.Linear(self.hidden_dim, 1) 
         )
         
-        # 2. 神经网络提炼器 (The SubNetwork) —— 部署在 post 阶段
+        # ==========================================================
+        # ★ 绝对公平对齐的神经网络提炼器 (The SubNetwork) ★
+        # ==========================================================
         self.dynamic_generator = nn.Sequential(
-            nn.Conv1d(self.enc_channels + self.enc_dim, self.hidden_dim, kernel_size=1),
+            nn.Conv1d(self.enc_channels + self.hidden_dim, self.hidden_dim, kernel_size=1),
             nn.BatchNorm1d(self.hidden_dim),
             nn.PReLU(),
             nn.Conv1d(self.hidden_dim, self.enc_channels, kernel_size=1),
-            nn.Sigmoid() if self.fusion_type == 'multiply' else nn.Identity()
+            # ★ 核心修改：使用 PReLU 替代 Sigmoid，对齐 DSENet 的 Linear->LN->PReLU 结构
+            nn.PReLU() if self.fusion_type == 'multiply' else nn.Identity()
         )
 
-    def compute(self, Y, azi, ele=None, pairs=None):
-        """ 仅提供纯净的、静态的“目标空间锚点” """
+    def compute(self, azi, ele=None, Y=None, pairs=None):
         if not self.enabled:
             return None
             
-        if azi.dim() == 1: azi = azi.unsqueeze(1)
-        if ele is not None and ele.dim() == 1: ele = ele.unsqueeze(1)
+        is_missing = (azi <= -998.0)
+        safe_azi = torch.where(is_missing, torch.zeros_like(azi), azi)
+            
+        if safe_azi.dim() == 1: safe_azi = safe_azi.unsqueeze(1)
+        if ele is not None:
+            safe_ele = torch.where(ele <= -998.0, torch.zeros_like(ele), ele)
+            if safe_ele.dim() == 1: safe_ele = safe_ele.unsqueeze(1)
+        else:
+            safe_ele = None
         
         if self.encoding_type == "exp":
-            doa_enc = self.encoder(azi, ele) 
+            doa_enc = self.encoder(safe_azi, safe_ele) 
         else:
-            doa_enc = self.encoder(azi)
-            if self.use_ele and ele is not None:
-                ele_input = torch.abs(ele) if self.encoding_type in ["oh", "onehot"] else ele
+            doa_enc = self.encoder(safe_azi)
+            if self.use_ele and safe_ele is not None:
+                ele_input = torch.abs(safe_ele) if self.encoding_type in ["oh", "onehot"] else safe_ele
                 doa_enc = torch.cat([doa_enc, self.encoder(ele_input)], dim=-1)
                 
-        return doa_enc.squeeze(1)
+        doa_enc = doa_enc.squeeze(1) # (B, enc_dim)
+
+        spatial_repr = self.spatial_proj(doa_enc) # (B, hidden_dim)
+        
+        if is_missing.dim() == 2:
+            is_missing = is_missing[:, 0]
+        is_missing = is_missing.view(-1, 1)
+        spatial_repr = torch.where(is_missing, torch.zeros_like(spatial_repr), spatial_repr)
+
+        return spatial_repr
 
     def post(self, mix_repr, spatial_repr):
-        """ 核心战场：跨模态动态生成与提炼 """
         if spatial_repr is None:
             return mix_repr
             
         B, C_enc, F_dim, T_dim = mix_repr.shape
-        
-        if C_enc != self.enc_channels:
-            raise ValueError(f"Feature C_enc ({C_enc}) != Config enc_channels ({self.enc_channels})")
-        if F_dim != self.f_dim:
-            raise ValueError(f"Input F_dim ({F_dim}) != Initialized f_dim ({self.f_dim})")
 
-        # ==========================================================
-        # Step 1: 频域物理模式解码 (Frequency Pattern Decoding)
-        # ==========================================================
-        # (B, C_enc, F_dim, T_dim) -> (B, C_enc, T_dim, F_dim)
         scene_t = mix_repr.permute(0, 1, 3, 2)
+        scene_t = self.freq_proj(scene_t) # (B, C_enc, T_dim, 1)
+        scene_t = scene_t.squeeze(-1)     # (B, C_enc, T_dim)
         
-        # 让网络审视完整的 F 轴分布规律: (B, C_enc, T_dim, F_dim) -> (B, C_enc, T_dim, 1)
-        scene_t = self.freq_proj(scene_t)
-        
-        # 丢掉最后一维: (B, C_enc, T_dim)
-        scene_t = scene_t.squeeze(-1)
-        
-        # ==========================================================
-        # Step 2: 提取全局空间先验，并沿时间轴张成矩阵
-        # ==========================================================
         doa_t = spatial_repr.unsqueeze(-1).expand(-1, -1, T_dim)
         
-        # ==========================================================
-        # Step 3: 神经网络跨模态提炼 
-        # ==========================================================
-        combined_feat = torch.cat([scene_t, doa_t], dim=1)
-        dynamic_mask = self.dynamic_generator(combined_feat)
-        dynamic_mask = dynamic_mask.unsqueeze(2) # (B, C_enc, 1, T)
+        combined_feat = torch.cat([scene_t, doa_t], dim=1) 
         
-        # ==========================================================
-        # Step 4: 应用门控，触发广播机制
-        # ==========================================================
+        # 此时输出的 dynamic_mask 是经过 PReLU 激活的，边界与 DSENet 一致
+        dynamic_mask = self.dynamic_generator(combined_feat) 
+        dynamic_mask = dynamic_mask.unsqueeze(2) 
+        
         if self.fusion_type == "multiply":
             return mix_repr * dynamic_mask
         elif self.fusion_type == "add":
@@ -458,6 +459,201 @@ class PosteriorMaskFeature(BaseSpatialFeature):
             return torch.cat([mix_repr, spatial_repr], dim=1)
             
         return mix_repr
+    
+class SoundCompassSubbandProcessor(nn.Module):
+    """
+    严格对应论文 Figure 1(b) 虚线框 "for each subband" 内部的所有操作
+    """
+    def __init__(self, spin_dim, dim_hidden, enc_dim):
+        super().__init__()
+        
+        # 1. Feature Encoding Module
+        self.feature_encoder = nn.Sequential(
+            nn.Conv2d(spin_dim, dim_hidden, kernel_size=1), # 对应 Linear
+            AdaNorm2d(),                                  # 对应 AdaNorm
+            nn.PReLU()                                      # 对应 PReLU
+        )
+        
+        # 2. ★ 修正：子带专属的 Clue Encoding Module (FiLM) ★
+        self.film_gen = nn.Linear(enc_dim, dim_hidden * 2)
+        
+        # 3. Target Decoding Module
+        self.target_decoder = nn.Sequential(
+            nn.Conv2d(dim_hidden, dim_hidden, kernel_size=1), # 对应 Linear
+            AdaNorm2d(),                                  # 对应 AdaNorm
+            nn.PReLU()                                      # 对应 PReLU
+        )
+
+    def forward(self, spin_sub, doa_enc):
+        # 1. 编码子带声学特征: (B, spin_dim, f_k, T) -> (B, dim_hidden, f_k, T)
+        feat_enc = self.feature_encoder(spin_sub)
+        
+        # 2. 生成当前子带专属的 FiLM 调制参数
+        film_params = self.film_gen(doa_enc) # (B, dim_hidden * 2)
+        gamma, beta = torch.chunk(film_params, 2, dim=-1)
+        
+        gamma = gamma.view(feat_enc.shape[0], -1, 1, 1)
+        beta = beta.view(feat_enc.shape[0], -1, 1, 1)
+        
+        # 3. 跨模态调制与残差连接 (对应图中的圆圈叉乘、加法、和旁路箭头)
+        feat_mod = (gamma * feat_enc + beta) + feat_enc 
+        
+        # 4. 目标解码
+        dec_sub = self.target_decoder(feat_mod)
+        return dec_sub
+
+
+class SoundCompassFusionFeature(BaseSpatialFeature):
+    """
+    100% 严谨复刻版 SoundCompass 融合模块
+    包含: Option A 严格 SPIN + 12-TET Band-split + True AdaNorm + 子带残差 FiLM
+    """
+    def __init__(self, config, geometry_ctx=None):
+        super().__init__(config, geometry_ctx)
+        
+        self.enabled = config.get('enabled', False)
+        if not self.enabled: return
+
+        self.dim_hidden = config.get('enc_channels', 96) 
+        self.use_ele = config.get('use_ele', True)
+        
+        if geometry_ctx is not None and 'mic_pos' in geometry_ctx:
+            M = geometry_ctx['mic_pos'].shape[0]
+        else:
+            M = 4 
+        self.spin_dim = (2 * M) ** 2  
+        
+        encoding_cfg = config.get("encoding_config", {"encoding": "sh", "sh_order": 5})
+        self.encoder, self.enc_dim = PosEncodingFactory.create(encoding_cfg, self.use_ele)
+        self.encoding_type = encoding_cfg.get("encoding", "sh")
+        
+        # ★ 修正：获取真实的物理采样率和 FFT 点数用于 12-TET 计算 ★
+        fs = self.config.get('geometry', {}).get('fs', 16000)
+        n_fft = self.config.get('geometry', {}).get('n_fft', 512)
+        self.f_dim = geometry_ctx['omega_over_c'].shape[0] if geometry_ctx is not None else (n_fft // 2 + 1)
+        
+        # 划分 K=31 个重叠子带，并获取对应的平滑交叉淡入淡出窗 (Cross-fade windows)
+        self.num_bands = 31
+        self.subband_indices, self.subband_windows = self._generate_12tet_overlapping_bands(fs, n_fft, self.num_bands)
+        
+        # 实例化 31 个包含独立 FiLM 发生器的完整子带处理器
+        self.subbands = nn.ModuleList([
+            SoundCompassSubbandProcessor(self.spin_dim, self.dim_hidden, self.enc_dim)
+            for _ in range(self.num_bands)
+        ])
+
+    def _generate_12tet_overlapping_bands(self, fs, n_fft, num_bands):
+        """
+        严格依据 12-TET 音乐音阶分频，并附带平滑加权窗。
+        """
+        f_min = fs / n_fft  
+        f_max = fs / 2.0    
+        
+        z_min = 69.0 + 12.0 * math.log2(f_min / 440.0)
+        z_max = 69.0 + 12.0 * math.log2(f_max / 440.0)
+        
+        z_points = torch.linspace(z_min, z_max, num_bands + 2)
+        f_points = 440.0 * (2.0 ** ((z_points - 69.0) / 12.0))
+        
+        bin_points = f_points * n_fft / fs
+        bin_points = torch.round(bin_points).long()
+        bin_points[0] = 0 
+        
+        num_bins = n_fft // 2 + 1
+        indices = []
+        windows = [] # ★ 新增：用于存储每个子带的平滑窗
+        
+        for i in range(num_bands):
+            start = max(0, bin_points[i].item())
+            end = min(num_bins, bin_points[i+2].item() + 1)
+            
+            if end <= start: 
+                end = start + 1
+            
+            # ★ 核心补丁：生成平滑淡入淡出窗
+            L = end - start
+            # 使用 Hann 窗，边缘渐变为 0，中心为 1，重叠相加极其平滑
+            win = torch.hann_window(L) 
+            
+            indices.append((start, end))
+            windows.append(win)
+            
+        return indices, windows
+
+    def compute(self, azi, ele=None, Y=None, pairs=None):
+        if not self.enabled: return None
+        B, M, F, T = Y.shape
+
+        # ==========================================================
+        # ★ 修正：Option A (纯相位提取)，严格限制在 +-1 范围内 ★
+        # ==========================================================
+        Y_mag = torch.abs(Y)
+        Y_norm = Y / (Y_mag + 1e-8)
+        
+        # 此时 Y_norm.real 和 Y_norm.imag 严格等价于 cos(theta) 和 sin(theta)
+        components = torch.cat([Y_norm.real, Y_norm.imag], dim=1) 
+        interaction = components.unsqueeze(2) * components.unsqueeze(1) 
+        spin_feat = interaction.view(B, self.spin_dim, F, T) 
+
+        # --- DOA 提取 ---
+        is_missing = (azi <= -998.0)
+        safe_azi = torch.where(is_missing, torch.zeros_like(azi), azi)
+        if safe_azi.dim() == 1: safe_azi = safe_azi.unsqueeze(1)
+        
+        if ele is not None:
+            safe_ele = torch.where(ele <= -998.0, torch.zeros_like(ele), ele)
+            if safe_ele.dim() == 1: safe_ele = safe_ele.unsqueeze(1)
+        else: safe_ele = torch.zeros_like(safe_azi)
+        
+        if self.encoding_type == "sh":
+            doa_enc = self.encoder(safe_azi, safe_ele)
+        else:
+            doa_enc = self.encoder(safe_azi)
+            if self.use_ele and ele is not None:
+                ele_input = torch.abs(safe_ele) if self.encoding_type in ["oh", "onehot"] else safe_ele
+                doa_enc = torch.cat([doa_enc, self.encoder(ele_input)], dim=-1)
+                
+        doa_enc = doa_enc.squeeze(1) 
+        
+        if is_missing.dim() == 2: is_missing = is_missing[:, 0]
+        is_missing = is_missing.view(-1, 1)
+        doa_enc = torch.where(is_missing, torch.zeros_like(doa_enc), doa_enc)
+
+        return {"spin": spin_feat, "doa": doa_enc}
+
+    def post(self, mix_repr, spatial_repr):
+        if spatial_repr is None: return mix_repr
+        
+        spin_feat = spatial_repr["spin"] 
+        doa_enc = spatial_repr["doa"]    
+        B, D, F, T = mix_repr.shape
+
+        merged_feat = torch.zeros(B, D, F, T, device=mix_repr.device)
+        # ★ 修正：不再用 overlap_count，而是累积窗函数的权重总和
+        weight_sum = torch.zeros(1, 1, F, 1, device=mix_repr.device)
+
+        # 在 K=31 个子带中独立处理
+        for k in range(self.num_bands):
+            start, end = self.subband_indices[k]
+            # 获取当前子带的平滑窗，并转换为 (1, 1, F_sub, 1) 的形状以支持广播
+            win = self.subband_windows[k].to(mix_repr.device).view(1, 1, -1, 1)
+            
+            spin_sub = spin_feat[:, :, start:end, :]
+            
+            # 子带解码 (输出无界 PReLU 特征)
+            dec_sub = self.subbands[k](spin_sub, doa_enc)
+            
+            # ★ 核心补丁：加权累加 (边缘特征被自动压低，中心特征占主导)
+            merged_feat[:, :, start:end, :] += dec_sub * win
+            weight_sum[:, :, start:end, :] += win
+
+        # ★ 核心补丁：用累积的三角窗权重进行全局归一化，保证能量绝对守恒
+        # clamp 1e-8 防止发生除零错误
+        merged_feat = merged_feat / weight_sum.clamp(min=1e-8)
+
+        # 返回乘法调制后的结果
+        return mix_repr * merged_feat
+
 class SpatialFrontend(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -465,12 +661,8 @@ class SpatialFrontend(nn.Module):
         # ===== Default Config =====
         DEFAULT_CONFIG = {
             "geometry": {
-                "n_fft": 512,
-                "hop_length": 128,
-                "win_length": 512,
-                "fs": 16000,
-                "c": 343.0,
-                "mic_spacing": 0.033333,
+                "n_fft": 512, "hop_length": 128, "win_length": 512, "fs": 16000,
+                "c": 343.0, "mic_spacing": 0.033333,
                 "mic_coords": [
                     [-0.05,        0.0, 0.0],
                     [-0.01666667,  0.0, 0.0],
@@ -495,20 +687,23 @@ class SpatialFrontend(nn.Module):
                     "hidden_size_f": 256, "hidden_size_t": 256, "use_ele": True
                 },
                 "posterior_mask": {
-                    "enabled": True, "hidden_dim": 32, "fusion_type": "multiply"
+                    "enabled": False, "hidden_dim": 32, "fusion_type": "multiply"
                 },
                 "latent_mixture_adaptive": {
-                    "enabled": False,
-                    "num_encoder": 1,
-                    "hidden_dim": 64,
-                    "enc_channels": 192,  
-                    "fusion_type": "multiply",
+                    "enabled": False, "num_encoder": 1, "hidden_dim": 64, "enc_channels": 192,  
+                    "fusion_type": "multiply", "use_ele": True,
+                    "encoding_config": {"encoding": "cyc", "cyc_alpha": 20, "cyc_dimension": 40}
+                },
+                # ★ 新增：SoundCompass 融合特征配置
+                "soundcompass_fusion": {
+                    "enabled": False, 
+                    "num_encoder": 1, 
+                    "enc_channels": 96, # 注意：需与你的分离主干 dim_hidden 对齐
+                    "use_ele": True,
                     "encoding_config": {
-                        "encoding": "cyc",
-                        "cyc_alpha": 20,
-                        "cyc_dimension": 40
-                    },
-                    "use_ele": True
+                        "encoding": "sh", # 默认使用球谐编码
+                        "sh_order": 5
+                    }
                 }
             }
         }
@@ -536,14 +731,15 @@ class SpatialFrontend(nn.Module):
         feat_cfg = self.config['features']
         
         FEATURE_REGISTRY = {
-            'ipd': IPDFeature,
-            'cdf': CDFFeature,
-            'sdf': SDFFeature,
-            'delta_stft': DSTFTFeature,
+            'ipd': IPDFeature,      # 需确保之前有定义
+            'cdf': CDFFeature,      # 需确保之前有定义
+            'sdf': SDFFeature,      # 需确保之前有定义
+            'delta_stft': DSTFTFeature, # 需确保之前有定义
             'Multiply_emb': TimeVariantMultiplyFeature,
             'InitStates_emb': InitStatesFeature,
-            'posterior_mask': PosteriorMaskFeature,
-            'latent_mixture_adaptive': LatentMixtureAdaptiveFeature 
+            'posterior_mask': PosteriorMaskFeature, # 需确保之前有定义
+            'latent_mixture_adaptive': LatentMixtureAdaptiveFeature,
+            'soundcompass_fusion': SoundCompassFusionFeature # ★ 挂载完成
         }
         
         for feat_name, sub_cfg in feat_cfg.items():
@@ -554,7 +750,7 @@ class SpatialFrontend(nn.Module):
             num_encoder = sub_cfg.get('num_encoder', 1)
             sub_cfg_with_pairs = deep_update({'pairs': self.default_pairs}, sub_cfg)
             base_module = FEATURE_REGISTRY[feat_name](sub_cfg_with_pairs, geometry_ctx)
-            self.features[feat_name] = SpatialEncoderGroup(base_module, num_encoder)
+            self.features[feat_name] = SpatialEncoderGroup(base_module, num_encoder) # 需确保之前有定义
         
     def compute_all(self, Y, azi, ele=None, pairs=None):
         if ele is None: ele = torch.zeros_like(azi)
@@ -562,35 +758,3 @@ class SpatialFrontend(nn.Module):
         for name, module in self.features.items():
             out[name] = module.compute(Y=Y, azi=azi, ele=ele, pairs=pairs)
         return out
-
-    def post_all(self, mix_repr, feature_dict):
-        """ 原有的全局一次性融合 """
-        current_feat = mix_repr
-        feat_cfg = self.config['features']
-        for name in feat_cfg:
-            sub_cfg = feat_cfg[name]
-            if not sub_cfg.get('enabled', False): continue
-            if name in self.features and name in feature_dict:
-                module = self.features[name]
-                raw_data = feature_dict[name]
-                current_feat = module.post(current_feat, raw_data)
-        return current_feat
-        
-    # ==========================================================
-    # ★ 必须补上的分段融合拦截器 (核心) ★
-    # ==========================================================
-    def post_subset(self, mix_repr, feature_dict, target_features: list):
-        """
-        仅融合 target_features 列表里指定的特征，用于分段注入早期和晚期特征。
-        """
-        current_feat = mix_repr
-        feat_cfg = self.config['features']
-        
-        for name in target_features:
-            if name in feat_cfg and feat_cfg[name].get('enabled', False):
-                if name in self.features and name in feature_dict:
-                    module = self.features[name]
-                    raw_data = feature_dict[name]
-                    current_feat = module.post(current_feat, raw_data)
-                    
-        return current_feat

@@ -22,7 +22,32 @@ def select_norm(norm, dim, eps=1e-5, group=1):
         return nn.BatchNorm1d(dim, eps)
     else:
         return GlobalChannelLayerNorm(dim, eps, elementwise_affine=True)
-
+class AdaNorm2d(nn.Module):
+    """
+    严格复刻版自适应层归一化 (AdaNorm)
+    来源: "Understanding and Improving Layer Normalization" (NeurIPS 2019)
+    """
+    def __init__(self, k=0.1, C=1.0, eps=1e-5):
+        super().__init__()
+        # 严格遵守论文：k 和 C 只是超参数，绝对不使用 nn.Parameter!
+        self.k = k
+        self.C = C
+        self.eps = eps
+        
+    def forward(self, x):
+        # 1. 沿通道维度 (dim=1) 计算均值和方差，对应公式 y = (x - mu) / sigma
+        # 论文中是在 hidden size H 维度上计算 [cite: 1060]，对应我们的通道数 C
+        mu = x.mean(dim=1, keepdim=True)
+        var = x.var(dim=1, keepdim=True, unbiased=False)
+        
+        y = (x - mu) / torch.sqrt(var + self.eps)
+        
+        # 2. 计算自适应缩放因子: C * (1 - ky)
+        # 严格遵守论文指示：调用 .detach() 切断这部分的梯度回传 
+        adaptive_weight = self.C * (1.0 - self.k * y).detach()
+        
+        # 3. 输出: z = C(1 - ky) \odot y
+        return adaptive_weight * y
 
 class ChannelWiseLayerNorm(nn.LayerNorm):
     """

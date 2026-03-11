@@ -8,8 +8,9 @@ def parse_spk_from_key(key: str):
     # key: 7059-77900-0042_6385-34655-0034
     parts = key.split("_")
     spk = []
-    spk_id = parts[0].split("-")[0]
-    spk.append(spk_id)
+    for p in parts:
+        spk_id = p.split("-")[0]
+        spk.append(spk_id)
     return spk
 
 
@@ -37,7 +38,7 @@ def scan_librimix(dataset_path: Path):
             },
             "src": {
                 spk[0]: [str(s1)],
-                # spk[1]: [str(s2)],
+                spk[1]: [str(s2)],
             },
         }
 

@@ -3,7 +3,6 @@ import torch.nn as nn
 import math
 
 class PosEncodingFactory:
-    # manage encoding methods
     @staticmethod
     def create(encoding_config: dict, use_ele: bool = False):
         encoding_type = encoding_config.get("encoding", "oh")
@@ -12,22 +11,94 @@ class PosEncodingFactory:
             emb_dim = encoding_config.get("emb_dim", 360)
             encoder = OneHotEncoding(embed_dim=emb_dim)
             enc_dim = emb_dim * (2 if use_ele else 1)
-            
         elif encoding_type == "cyc":
             emb_dim = encoding_config.get("cyc_dimension", 40)
             alpha = encoding_config.get("cyc_alpha", 20)
             encoder = CycPosEncoding(embed_dim=emb_dim, alpha=alpha)
             enc_dim = emb_dim * (2 if use_ele else 1)
-            
-        elif encoding_type == "exp":
-            ele_mode = encoding_config.get("exp_ele_mode", "sphere")
-            encoder = ComplexExpEncoding(use_ele=use_ele, ele_mode=ele_mode)
-            enc_dim = 3 if (use_ele and ele_mode == "sphere") else (4 if use_ele else 2)
-            
+        elif encoding_type == "sh":
+            # SoundCompass 默认使用 5 阶
+            order = encoding_config.get("sh_order", 5)
+            encoder = SphericalHarmonicsEncoding(order=order)
+            enc_dim = encoder.out_dim
         else:
             raise ValueError(f"Unsupported encoding type: {encoding_type}")
             
         return encoder, enc_dim
+
+class SphericalHarmonicsEncoding(nn.Module):
+    """
+    SoundCompass 提出的球谐函数 (Spherical Harmonics, SH) 编码器。
+    将 (azi, ele) 映射到 2D 球面的连续正交基空间。
+    """
+    def __init__(self, order=5):
+        super().__init__()
+        self.order = order
+        # N阶SH的基函数个数为 (N+1)^2，由于拆分实部和虚部，总维度为 2(N+1)^2
+        self.out_dim = 2 * (order + 1) ** 2
+
+    def _compute_legendre_polynomials(self, x, order):
+        """ 迭代计算连带勒让德多项式 P_n^m(x) """
+        B = x.shape[0]
+        # P[n][m] 存储 P_n^m
+        P = [[torch.zeros_like(x) for _ in range(order + 1)] for _ in range(order + 1)]
+        
+        # 初始条件
+        P[0][0] = torch.ones_like(x)
+        if order > 0:
+            P[1][0] = x
+            sq = torch.sqrt(1 - x**2 + 1e-8)
+            P[1][1] = -sq
+            
+        for n in range(2, order + 1):
+            for m in range(n):
+                if m == n - 1:
+                    P[n][n-1] = x * (2 * n - 1) * P[n-1][n-1]
+                else:
+                    P[n][m] = (x * (2 * n - 1) * P[n-1][m] - (n + m - 1) * P[n-2][m]) / (n - m)
+            # P_n^n
+            P[n][n] = -(2 * n - 1) * sq * P[n-1][n-1]
+            
+        return P
+
+    def forward(self, azi, ele):
+        # 物理学标准球坐标：ele 通常是从 z 轴的极角 (0 到 pi)。
+        # 如果你的 ele 是仰角 (-pi/2 到 pi/2)，我们需要转换为极角
+        theta = math.pi / 2.0 - ele  # 仰角转极角
+        phi = azi
+        
+        cos_theta = torch.cos(theta)
+        P = self._compute_legendre_polynomials(cos_theta, self.order)
+        
+        sh_real = []
+        sh_imag = []
+        
+        for n in range(self.order + 1):
+            for m in range(n + 1):
+                # 归一化系数 (简化的常数项，网络可以通过 Linear 自行吸收尺度，这里保留数学比例)
+                coef = math.sqrt((2 * n + 1) / (4 * math.pi) * math.factorial(n - m) / (math.factorial(n + m) + 1e-8))
+                
+                P_nm = P[n][m]
+                
+                # m=0 时没有虚部，但为了结构对齐，虚部填 0
+                r_comp = coef * P_nm * torch.cos(m * phi)
+                i_comp = coef * P_nm * torch.sin(m * phi)
+                
+                sh_real.append(r_comp)
+                sh_imag.append(i_comp)
+                
+                # 负 m 部分 (通过对称性)
+                if m > 0:
+                    sh_real.append(r_comp) # 简化表示
+                    sh_imag.append(-i_comp)
+
+        # 拼接实部和虚部
+        sh_features = torch.cat(sh_real + sh_imag, dim=-1)
+        # 截断或补齐到精准的 out_dim (处理 m 正负项的冗余展开)
+        if sh_features.shape[-1] > self.out_dim:
+            sh_features = sh_features[..., :self.out_dim]
+            
+        return sh_features
 
 
 class ComplexExpEncoding(nn.Module):

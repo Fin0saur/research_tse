@@ -42,3 +42,4 @@ wespeaker_models
 
 # exp
 *.pt
+*.zip

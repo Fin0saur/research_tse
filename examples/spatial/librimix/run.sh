@@ -14,14 +14,14 @@ fs=16k
 min_max=min
 noise_type="clean"
 data_type="raw" # shard/raw
-Libri2Mix_dir=/root/Spatial_librimix #/YourPATH/librimix/Libri2Mix_spatial
+Libri2Mix_dir=/data1/yxy05/Spatial_librimix #/YourPATH/librimix/Libri2Mix_spatial
 mix_data_path="${Libri2Mix_dir}/wav${fs}/${min_max}"
 
 # Training related
-gpus="[0,1,2,3]"
+gpus="[1,2,3,4,5,6,7]"
 config=confs/tse_new.yaml
 data_config=confs/create_dataset.yaml
-exp_dir=exp/TSE_baseline
+exp_dir=exp/TSE_soundcompass
 if [ -z "${config}" ] && [ -f "${exp_dir}/config.yaml" ]; then
   config="${exp_dir}/config.yaml"
 fi
@@ -36,7 +36,7 @@ use_dnsmos=true
 dnsmos_use_gpu=true
 
 # Model average related
-num_avg=3
+num_avg=5
 
 . tools/parse_options.sh || exit 1
 
@@ -104,7 +104,7 @@ if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
     --src_path $exp_dir/models \
     --num ${num_avg} \
     --mode best \
-    --epochs "66,69,72"
+    --epochs "42,45,48,51,54"
 fi
 if [ -z "${checkpoint}" ] && [ -f "${exp_dir}/models/avg_best_model.pt" ]; then
   checkpoint="${exp_dir}/models/avg_best_model.pt"
@@ -114,7 +114,7 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
   echo "Start inferencing ..."
   python wesep/bin/infer.py --config $config \
     --fs ${fs} \
-    --gpus 0 \
+    --gpus 5 \
     --exp_dir ${exp_dir} \
     --data_type "${data_type}" \
     --test_data ${data}/test/${data_type}.list \

@@ -1,0 +1,18 @@
+cues:
+  audio:
+    type: raw
+    guaranteed: true
+    scope: speaker
+    policy:
+      type: random
+      key: spk_id
+      resource: data_full/clean/train-100/cues/audio.json
+  spatial:
+    type: npy
+    guaranteed: true
+    scope: speaker
+    policy:
+      type: fixed
+      key: mix_spk_id
+      resource: data_full/clean/train-100/cues/spatial.json
+    spatial_fields: ["azimuth","elevation"]  
