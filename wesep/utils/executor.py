@@ -133,9 +133,9 @@ class Executor:
                 # ---- backward ----
                 optimizer.zero_grad()
                 scaler.scale(loss).backward()
-                for name, param in model.named_parameters():
-                    if param.grad is None:
-                        print(f"未使用: {name}")
+                # for name, param in model.named_parameters():
+                #     if param.grad is None:
+                #         print(f"未使用: {name}")
                 scaler.unscale_(optimizer)
                 clip_gradients(model, clip_grad)
                 scaler.step(optimizer)

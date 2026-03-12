@@ -106,6 +106,8 @@ def sample_random_speaker_cue(
 
             if enrollment.ndim == 1:
                 enrollment = np.expand_dims(enrollment, axis=0)
+            elif enrollment.ndim == 2:
+                enrollment = np.expand_dims(enrollment[:,0],axis=0)
 
             sample[f"audio_{slot}"] = enrollment
 
@@ -170,9 +172,10 @@ def sample_fixed_speaker_cue(
                 if required:
                     raise
                 continue
-
             if enrollment.ndim == 1:
                 enrollment = np.expand_dims(enrollment, axis=0)
+            elif enrollment.ndim == 2:
+                enrollment = np.expand_dims(enrollment[:,0],axis=0)
 
             sample[f"audio_{slot}"] = enrollment
 

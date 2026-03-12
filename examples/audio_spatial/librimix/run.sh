@@ -18,10 +18,10 @@ Libri2Mix_dir=/data1/yxy05/Spatial_librimix
 mix_data_path="${Libri2Mix_dir}/wav${fs}/${min_max}"
 
 # Training related
-gpus="[0,1,2,3,4,5,6,7]"
-config=confs/tse_bsrnn_spk_spatial.yaml
+gpus="[2,3,4,5,6,7]"
+config=confs/tse_nbc2_spk_spatial.yaml
 data_config=confs/create_dataset.yaml
-exp_dir=exp/TSE_bsrnn_usef_context_mc_usef
+exp_dir=exp/TSE_nbc2_usef_context
 if [ -z "${config}" ] && [ -f "${exp_dir}/config.yaml" ]; then
   config="${exp_dir}/config.yaml"
 fi

@@ -1,0 +1,199 @@
+dataloader_args:
+  batch_size: 1 #RTX2080 1, V100: 8, A800: 16
+  drop_last: true
+  num_workers: 12
+  pin_memory: true
+  prefetch_factor: 6
+
+dataset_args:
+  resample_rate: &sr 16000
+  sample_num_per_epoch: 0
+  shuffle: False
+  shuffle_args:
+    shuffle_size: 2500
+  whole_utt: True
+  chunk_len: 48000
+  noise_prob: 0 # noqa
+  noise_lmdb_file: './data/musan/lmdb'
+  cues:
+    audio:
+      use: true
+      required: True
+    spatial:
+      use: true
+      required: True
+  cue_processing:
+    audio:
+      reverb_enroll_prob: 0
+      noise_enroll_prob: 0
+    spatial:
+
+enable_amp: False
+exp_dir: exp/tse_nbc2_spatial_all
+gpus: '0,1'
+log_batch_interval: 100
+
+loss: SISDR
+loss_args: { }
+whole_utt: True
+# loss: [SISDR, CE]               ### For joint training the speaker encoder with CE loss. Put SISDR in the first position for validation set
+# loss_args:
+#   loss_posi: [[0],[1]]
+#   loss_weight: [[1.0],[1.0]]
+
+model:
+  tse_model: TSE_NBC2_SPK_SPATIAL
+model_args:
+  tse_model:
+    full_input: true
+    win: 512         
+    stride: 256      
+    separator:
+      n_layers: 8          
+      dim_hidden: 96       
+      dim_ffn: 192        
+      block_kwargs:
+        n_heads: 2
+        dropout: 0.1
+        conv_kernel_size: 3
+        n_conv_groups: 8
+    speaker:
+      features:
+        listen:
+          enabled: False
+          glue: 512
+        usef:
+          enabled: True
+          spec_dim: 2
+          approx_qk_dim: 512
+          n_head: 4
+          t_ksize: 3
+        tfmap:
+          enabled: False
+          type: "spec"   # 'spec'
+        context:
+          enabled: True
+          speaker_model:
+          embed_dim: 512     # Need check the speaker encoder in wespeaker
+          atten_dim: 128         # dim in cross-attention
+          num_heads: 2
+          fusion: "multiply"    # add | concat | multiply
+        spkemb:
+          enabled: False
+          speaker_model:
+          fusion: "multiply" # add | concat | multiply
+      speaker_model:
+        fbank:
+          num_mel_bins: 80
+          frame_shift: 10
+          frame_length: 25
+          dither: 1.0
+          sample_rate: *sr       # sampling rate
+        # ---- Speaker Encoder
+        speaker_encoder:
+          model: ECAPA_TDNN_GLOB_c512
+          pretrained: ./wespeaker_models/voxceleb_ECAPA512/avg_model.pt
+          spk_args:
+            embed_dim: 192         # speaker embedding
+            feat_dim: 80         # num_mel_bins
+            pooling_func: "ASTP"
+          ####### ResNet    The pretrained speaker encoders are available from: https://github.com/wenet-e2e/wespeaker/blob/master/docs/pretrained.md
+          # spk_model: ResNet34 # ResNet18, ResNet34, ResNet50, ResNet101, ResNet152
+          # spk_model_init: False #./wespeaker_models/voxceleb_resnet34/avg_model.pt
+          # spk_args:
+          #   feat_dim: 80
+          #   embed_dim: &embed_dim 256
+          #   pooling_func: "TSTP" # TSTP, ASTP, MQMHASTP
+          #   two_emb_layer: False
+          ####### CAMPPlus
+          # spk_model: CAMPPlus
+          # spk_model_init: False
+          # spk_args:
+          #   feat_dim: 80
+          #   embed_dim: &embed_dim 192
+          #   pooling_func: "TSTP" # TSTP, ASTP, MQMHASTP
+          #################################################################
+    spatial:
+      geometry:
+        fs: 16000
+        c: 343.0
+        mic_spacing: 0.03333333 
+        mic_coords:
+          - [-0.05,        0.0, 0.0]  # Mic 0 (最左)
+          - [-0.0166,  0.0, 0.0]  # Mic 1
+          - [ 0.0166,  0.0, 0.0]  # Mic 2
+          - [ 0.05,        0.0, 0.0]  # Mic 3 (最右)
+      pairs:
+        - [0, 1]
+        - [1, 2]
+        - [2, 3]
+        - [0, 3]
+     
+      features:
+        ipd: 
+          enabled: False       
+        cdf: 
+          enabled: False      
+        sdf: 
+          enabled: False       
+        delta_stft: 
+          enabled: False
+        posterior_mask: 
+          enabled: False
+          hidden_dim: 32
+          fusion_type: multiply
+          num_encoder: 1
+          
+        latent_mixture_adaptive:
+          enabled: False         # 测试 SoundCompass 时先把它关掉，保证变量唯一
+          num_encoder: 1
+          hidden_dim: 64
+          enc_channels: 96       # 极其重要：必须与上方 separator 的 dim_hidden (96) 保持完全一致！
+          fusion_type: multiply  # 作为门控乘法注入到 NBC2 隐藏层
+          use_ele: True
+          encoding_config:
+            encoding: cyc        # 使用循环位置编码
+            cyc_alpha: 20
+            cyc_dimension: 40
+            
+        soundcompass_fusion:
+          enabled: False          # 开启测试
+          num_encoder: 1
+          enc_channels: 96       # 同样必须与 separator 的 dim_hidden 保持完全一致！
+          use_ele: True
+          encoding_config:
+            encoding: sh         # 使用球谐函数编码 (Spherical Harmonics)
+            sh_order: 5          # 论文中采用的 5 阶展开 (生成 72 维向量)
+        
+                
+
+# find_unused_parameters: True
+
+model_init:
+  tse_model: null
+  discriminator: null
+  spk_model: null
+
+num_avg: 10
+num_epochs: 150
+
+optimizer:
+  tse_model: Adam
+optimizer_args:
+  tse_model:
+    lr: 0.001  # NOTICE: These args do NOT work! The initial lr is determined in the scheduler_args currently!
+    weight_decay: 0.0001
+
+clip_grad: 5.0
+save_epoch_interval: 3
+
+scheduler:
+  tse_model: ExponentialDecrease
+scheduler_args:
+  tse_model:
+    final_lr: 2.5e-05
+    initial_lr: 0.001
+    warm_from_zero: false
+    warm_up_epoch: 0
+
+seed: 42
