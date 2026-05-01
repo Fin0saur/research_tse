@@ -30,7 +30,7 @@ dataset:
   paths:
     librispeech: "/data0/import/asr/LibriSpeech"
     noise: "/data1/yxy05/Nonspeech"
-    output: "/data1/yxy05/Spatial_probe/wav16k/min"
+    output: "/data1/yxy05/Spatial_zero/wav16k/min"
   splits:
     train: "train-clean-100"
     dev: "dev-clean"

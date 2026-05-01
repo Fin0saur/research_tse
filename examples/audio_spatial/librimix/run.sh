@@ -9,19 +9,19 @@ stage=1
 stop_stage=1
 
 # Data preparation related
-data=data_full
+data=data_zero
 fs=16k
 min_max=min
 noise_type="clean"
 data_type="raw" # shard/raw
-Libri2Mix_dir=/data1/yxy05/Spatial_librimix
+Libri2Mix_dir=/data1/yxy05/Spatial_zero
 mix_data_path="${Libri2Mix_dir}/wav${fs}/${min_max}"
 
 # Training related
-gpus="[2,3,4,5,6,7]"
+gpus="[0,1,2,3,4,5,6,7]"
 config=confs/tse_nbc2_spk_spatial.yaml
 data_config=confs/create_dataset.yaml
-exp_dir=exp/TSE_nbc2_usef_context
+exp_dir=exp/TSE_nbc2_usef
 if [ -z "${config}" ] && [ -f "${exp_dir}/config.yaml" ]; then
   config="${exp_dir}/config.yaml"
 fi
@@ -43,8 +43,7 @@ num_avg=3
 
 if [ ${stage} -le 0 ] && [ ${stop_stage} -ge 0 ]; then
   echo "Generate datasets ..."
-  python ./local/create_dataset_spatial.py --config ${data_config} \
-    --stage "all"
+  python ./local/create_new_dataset.py --config ${data_config}
 fi
 
 if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
@@ -53,7 +52,7 @@ if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
     --data ${data} \
     --noise_type ${noise_type} \
     --stage 1 \
-    --stop-stage 4
+    --stop-stage 3
 fi
 # if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
 #   echo "Prepare datasets ..."
@@ -111,7 +110,7 @@ if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
     --src_path $exp_dir/models \
     --num ${num_avg} \
     --mode best \
-    --epochs "45,48,51"
+    --epochs "99,102,105"
 fi
 if [ -z "${checkpoint}" ] && [ -f "${exp_dir}/models/avg_best_model.pt" ]; then
   checkpoint="${exp_dir}/models/avg_best_model.pt"
@@ -128,7 +127,7 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
     --test_cues ${data}/test/cues.yaml \
     --test_samples ${data}/test/samples.jsonl \
     --save_wav ${save_results} \
-    --checkpoint "/data1/yxy05/new/wesep_spatial/examples/audio_spatial/librimix/exp/TSE_bsrnn_hybrid_new_mc/models/checkpoint_66.pt"
+    --checkpoint "/home/yxy05/code/research_tse/examples/audio_spatial/librimix/exp/TSE_nbc2_usef/models/avg_best_model.pt"
 fi
 
 if [ ${stage} -le 6 ] && [ ${stop_stage} -ge 6 ]; then
@@ -141,3 +140,19 @@ if [ ${stage} -le 6 ] && [ ${stop_stage} -ge 6 ]; then
     --dnsmos_use_gpu "${dnsmos_use_gpu}" \
     --n_gpu "${num_gpus}"
 fi
+
+
+if [ ${stage} -le 7 ] && [ ${stop_stage} -ge 7 ]; then
+  echo "Start inferencing ..."
+  python wesep/bin/infer_plot.py --config $config \
+    --fs ${fs} \
+    --gpus 0 \
+    --exp_dir ${exp_dir} \
+    --data_type "${data_type}" \
+    --test_data ${data}/test/${data_type}.list \
+    --test_cues ${data}/test/cues.yaml \
+    --test_samples ${data}/test/samples.jsonl \
+    --save_wav ${save_results} \
+    --checkpoint "/home/yxy05/code/research_tse/examples/audio_spatial/librimix/exp/TSE_nbc2_usef/models/avg_best_model.pt"
+fi
+

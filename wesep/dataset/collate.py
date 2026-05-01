@@ -321,8 +321,12 @@ def tse_collate_fn(batch, collect_keys):
             )
         else:
             if len(flat_lens) == 0:
-                # no real value in entire batch
-                target_len = 512
+                if "spatial" in out_key:
+                    target_len = 2
+                elif "audio" in out_key:
+                    target_len = 16000
+                else:
+                    target_len = 512
             elif align == "max":
                 target_len = max(flat_lens)
             elif align == "min":
@@ -340,16 +344,28 @@ def tse_collate_fn(batch, collect_keys):
                         f"[collate] Required feature '{out_key}' missing for batch sample {idx}"
                     )
                 if ref_tensor is None:
-                    raise RuntimeError(
-                        f"[collate] Cannot infer fallback shape for '{out_key}': "
-                        "no real sample exists in batch.")
-                # fallback
-                x = torch.zeros(ref_tensor.shape,
-                                dtype=ref_tensor.dtype,
-                                device=ref_tensor.device)
-
+                    if "spatial" in out_key:
+                        fallback_shape = (2, )
+                        x = torch.full(fallback_shape,
+                                       -999.0,
+                                       dtype=torch.float32)
+                    elif "audio" in out_key:
+                        fallback_shape = (1, target_len)
+                        x = torch.zeros(fallback_shape, dtype=torch.float32)
+                    else:
+                        fallback_shape = (target_len, )
+                        x = torch.zeros(fallback_shape, dtype=torch.float32)
+                else:
+                    if "spatial" in out_key:
+                        x = torch.full(ref_tensor.shape,
+                                       -999.0,
+                                       dtype=ref_tensor.dtype,
+                                       device=ref_tensor.device)
+                    else:
+                        x = torch.zeros(ref_tensor.shape,
+                                        dtype=ref_tensor.dtype,
+                                        device=ref_tensor.device)
             x = _pad_or_crop_to_len(x, target_len)
-
             out_feats.append(x)
 
         # ---- 2.5) stack batch dimension ----

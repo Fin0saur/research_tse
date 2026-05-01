@@ -43,3 +43,8 @@ wespeaker_models
 # exp
 *.pt
 *.zip
+
+*.png
+
+data_probe/
+data_zero/

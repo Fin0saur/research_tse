@@ -40,12 +40,12 @@ model:
 model_args:
   tse_model:
     full_input: true
-    win: 512         
-    stride: 256      
+    win: 512
+    stride: 256
     separator:
-      n_layers: 8          
-      dim_hidden: 96       
-      dim_ffn: 192        
+      n_layers: 8
+      dim_hidden: 96
+      dim_ffn: 192
       block_kwargs:
         n_heads: 2
         dropout: 0.1
@@ -55,7 +55,7 @@ model_args:
       geometry:
         fs: 16000
         c: 343.0
-        mic_spacing: 0.03333333 
+        mic_spacing: 0.03333333
 
       pairs:
         - [0, 1]
@@ -68,20 +68,20 @@ model_args:
         - [ 0.0166,  0.0, 0.0]  # Mic 2
         - [ 0.05,        0.0, 0.0]  # Mic 3 (最右)
       features:
-        ipd: 
-          enabled: False       
-        cdf: 
-          enabled: False      
-        sdf: 
-          enabled: False       
-        delta_stft: 
-          enabled: False
-        posterior_mask: 
+        ipd:
+          enabled: true
+        cdf:
+          enabled: true
+        sdf:
+          enabled: true
+        delta_stft:
+          enabled: true
+        posterior_mask:
           enabled: False
           hidden_dim: 32
           fusion_type: multiply
           num_encoder: 1
-          
+
         latent_mixture_adaptive:
           enabled: False         # 测试 SoundCompass 时先把它关掉，保证变量唯一
           num_encoder: 1
@@ -93,17 +93,17 @@ model_args:
             encoding: cyc        # 使用循环位置编码
             cyc_alpha: 20
             cyc_dimension: 40
-            
+
         soundcompass_fusion:
-          enabled: True          # 开启测试
+          enabled: false          # 开启测试
           num_encoder: 1
           enc_channels: 96       # 同样必须与 separator 的 dim_hidden 保持完全一致！
           use_ele: True
           encoding_config:
             encoding: sh         # 使用球谐函数编码 (Spherical Harmonics)
             sh_order: 5          # 论文中采用的 5 阶展开 (生成 72 维向量)
-        
-                
+
+
 
 # find_unused_parameters: True
 
@@ -123,7 +123,7 @@ optimizer_args:
     weight_decay: 0.0001
 
 clip_grad: 5.0
-save_epoch_interval: 3
+save_epoch_interval: 1
 
 scheduler:
   tse_model: ExponentialDecrease

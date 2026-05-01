@@ -46,12 +46,12 @@ model:
 model_args:
   tse_model:
     full_input: true
-    win: 512         
-    stride: 256      
+    win: 512
+    stride: 256
     separator:
-      n_layers: 8          
-      dim_hidden: 96       
-      dim_ffn: 192        
+      n_layers: 8
+      dim_hidden: 96
+      dim_ffn: 192
       block_kwargs:
         n_heads: 2
         dropout: 0.1
@@ -72,7 +72,7 @@ model_args:
           enabled: False
           type: "spec"   # 'spec'
         context:
-          enabled: True
+          enabled: False
           speaker_model:
           embed_dim: 512     # Need check the speaker encoder in wespeaker
           atten_dim: 128         # dim in cross-attention
@@ -117,7 +117,7 @@ model_args:
       geometry:
         fs: 16000
         c: 343.0
-        mic_spacing: 0.03333333 
+        mic_spacing: 0.03333333
         mic_coords:
           - [-0.05,        0.0, 0.0]  # Mic 0 (最左)
           - [-0.0166,  0.0, 0.0]  # Mic 1
@@ -128,22 +128,22 @@ model_args:
         - [1, 2]
         - [2, 3]
         - [0, 3]
-     
+
       features:
-        ipd: 
-          enabled: False       
-        cdf: 
-          enabled: False      
-        sdf: 
-          enabled: False       
-        delta_stft: 
+        ipd:
           enabled: False
-        posterior_mask: 
+        cdf:
+          enabled: False
+        sdf:
+          enabled: False
+        delta_stft:
+          enabled: False
+        posterior_mask:
           enabled: False
           hidden_dim: 32
           fusion_type: multiply
           num_encoder: 1
-          
+
         latent_mixture_adaptive:
           enabled: False         # 测试 SoundCompass 时先把它关掉，保证变量唯一
           num_encoder: 1
@@ -155,7 +155,7 @@ model_args:
             encoding: cyc        # 使用循环位置编码
             cyc_alpha: 20
             cyc_dimension: 40
-            
+
         soundcompass_fusion:
           enabled: False          # 开启测试
           num_encoder: 1
@@ -164,8 +164,8 @@ model_args:
           encoding_config:
             encoding: sh         # 使用球谐函数编码 (Spherical Harmonics)
             sh_order: 5          # 论文中采用的 5 阶展开 (生成 72 维向量)
-        
-                
+
+
 
 # find_unused_parameters: True
 

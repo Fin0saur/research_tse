@@ -22,32 +22,36 @@ def select_norm(norm, dim, eps=1e-5, group=1):
         return nn.BatchNorm1d(dim, eps)
     else:
         return GlobalChannelLayerNorm(dim, eps, elementwise_affine=True)
+
+
 class AdaNorm2d(nn.Module):
     """
     严格复刻版自适应层归一化 (AdaNorm)
     来源: "Understanding and Improving Layer Normalization" (NeurIPS 2019)
     """
+
     def __init__(self, k=0.1, C=1.0, eps=1e-5):
         super().__init__()
         # 严格遵守论文：k 和 C 只是超参数，绝对不使用 nn.Parameter!
         self.k = k
         self.C = C
         self.eps = eps
-        
+
     def forward(self, x):
         # 1. 沿通道维度 (dim=1) 计算均值和方差，对应公式 y = (x - mu) / sigma
         # 论文中是在 hidden size H 维度上计算 [cite: 1060]，对应我们的通道数 C
         mu = x.mean(dim=1, keepdim=True)
         var = x.var(dim=1, keepdim=True, unbiased=False)
-        
+
         y = (x - mu) / torch.sqrt(var + self.eps)
-        
+
         # 2. 计算自适应缩放因子: C * (1 - ky)
-        # 严格遵守论文指示：调用 .detach() 切断这部分的梯度回传 
+        # 严格遵守论文指示：调用 .detach() 切断这部分的梯度回传
         adaptive_weight = self.C * (1.0 - self.k * y).detach()
-        
+
         # 3. 输出: z = C(1 - ky) \odot y
         return adaptive_weight * y
+
 
 class ChannelWiseLayerNorm(nn.LayerNorm):
     """
@@ -162,10 +166,62 @@ class ConditionalLayerNorm(nn.Module):
         return "{normalized_shape}, {embed_dim}, \
             modulate_bias={modulate_bias}, eps={eps}".format(**self.__dict__)
 
+
+class EnergyNorm(nn.Module):
+
+    def __init__(self, eps=1e-8):
+        """
+        能量归一化 (E-Norm / Standard Deviation Normalization)
+        用于 Speaker Embedding 分支，强制消除音频的能量/音量波动。
+        """
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, x):
+        """
+        正向传播：对输入进行标准差归一化
+        :param x: 输入张量，通常是复数频谱 (B, C, F, T) 或实数波形/特征
+        :return: (归一化后的张量 x_norm, 用于恢复的缩放系数 scale)
+        """
+        B = x.shape[0]
+
+        # 1. 计算标准差 (Standard Deviation)
+        # 如果输入是复数（如 STFT 频谱），需先取绝对值得到幅度包络，再计算方差
+        if torch.is_complex(x):
+            mag = torch.abs(x)
+            # 替换为 reshape，自动处理内存不连续问题
+            mag_reshaped = mag.reshape(B, -1)
+            scale = torch.std(mag_reshaped, dim=1, keepdim=True)
+        else:
+            # 同样替换为 reshape
+            x_reshaped = x.reshape(B, -1)
+            scale = torch.std(x_reshaped, dim=1, keepdim=True)
+
+        # 2. 形状对齐 (Broadcasting)
+        # 将 scale 从 (B, 1) 重塑为与输入 x 相同的维度数，例如 (B, 1, 1, 1)
+        view_shape = [B] + [1] * (x.dim() - 1)
+        scale = scale.view(*view_shape) + self.eps
+
+        # 3. 执行归一化
+        x_norm = x / scale
+
+        return x_norm, scale
+
+    def inverse(self, x_norm, scale):
+        """
+        逆向传播：恢复音频的原始能量范围
+        :param x_norm: 经过网络处理后的归一化张量
+        :param scale: forward 时保存的缩放系数
+        :return: 恢复能量后的张量
+        """
+        return x_norm * scale
+
+
 class AmplitudeNorm(nn.Module):
     """
     Simple Amplitude Normalization (Parameter-free)
     """
+
     def __init__(self, eps=1e-8):
         super().__init__()
         self.eps = eps
@@ -178,11 +234,11 @@ class AmplitudeNorm(nn.Module):
             ref = x
         mag = torch.abs(ref).mean(dim=(1, 2), keepdim=True) + self.eps
         if x.dim() == 4:
-            scale = mag.unsqueeze(1) # (B, 1, 1, 1)
+            scale = mag.unsqueeze(1)  # (B, 1, 1, 1)
         else:
-            scale = mag.unsqueeze(1) # (B, 1, 1)
+            scale = mag.unsqueeze(1)  # (B, 1, 1)
         return x / scale, scale
-        
+
     def inverse(self, y, scale):
         if y.dim() == 2: scale = scale.view(y.shape[0], 1)
         elif y.dim() == 3: scale = scale.view(y.shape[0], 1, 1)

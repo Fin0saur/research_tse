@@ -1,5 +1,5 @@
 dataloader_args:
-  batch_size: 2 #RTX2080 1, V100: 8, A800: 16
+  batch_size: 4 #RTX2080 1, V100: 8, A800: 16
   drop_last: true
   num_workers: 6
   pin_memory: true
@@ -8,7 +8,7 @@ dataloader_args:
 dataset_args:
   resample_rate: &sr 16000
   sample_num_per_epoch: 0
-  shuffle: true
+  shuffle: False
   shuffle_args:
     shuffle_size: 2500
   chunk_len: 48000
@@ -49,21 +49,24 @@ model_args:
       causal: False
       nspk: 1
     speaker:
+      sv_head:
+          enabled: false
+          num_speakers: 251
       features:
         listen:
           enabled: False
           glue: 512
         usef:
-          enabled: True
+          enabled: true
           spec_dim: 2
           approx_qk_dim: 512
           n_head: 4
           t_ksize: 3
         tfmap:
-          enabled: False
+          enabled: false
           type: "spec"   # 'spec'
         context:
-          enabled: True
+          enabled: False
           speaker_model:
           embed_dim: 512     # Need check the speaker encoder in wespeaker
           atten_dim: 128         # dim in cross-attention

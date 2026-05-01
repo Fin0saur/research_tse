@@ -48,7 +48,7 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
     python local/build_audio_cues.py \
       --samples_jsonl "${mix_index}" \
       --outfile "${out_dir}/audio.json"
-  
+
     spatial_root=${mix_data_path}/${dset}/spatial
     python local/build_spatial_cues.py \
       --samples_jsonl "${mix_index}" \
@@ -73,7 +73,7 @@ cues:
       type: fixed
       key: mix_spk_id
       resource: ${data}/${noise_type}/${dset}/cues/spatial.json
-    spatial_fields: ["azimuth","elevation"]  
+    spatial_fields: ["azimuth","elevation"]
 EOF
   done
 fi
@@ -103,7 +103,7 @@ if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then
       --mixture2enrollment "${out_dir}/mixture2enrollment" \
       --speech_json "${out_dir}/audio.json" \
       --outfile "${out_dir}/fixed_enroll.json"
-    
+
     python local/build_spatial_cues.py \
       --samples_jsonl "${mix_index}" \
       --spatial_root "${spatial_root}" \
@@ -127,7 +127,7 @@ cues:
       type: fixed
       key: mix_spk_id
       resource: ${data}/${noise_type}/${dset}/cues/spatial.json
-    spatial_fields: ["azimuth","elevation"]  
+    spatial_fields: ["azimuth","elevation"]
 EOF
   done
 fi
@@ -183,3 +183,61 @@ fi
 #               -g 0 # GPU idx
 #   done
 # fi
+
+if [ ${stage} -le 7 ] && [ ${stop_stage} -ge 7 ]; then
+  echo "Prepare the meta files for the datasets (JSONL)"
+
+  for dataset in test; do
+    echo "Preparing JSONL for" $dataset
+    dataset_path=$mix_data_path/$dataset/mix_${noise_type}
+    out_dir="${real_data}/${noise_type}/${dataset}"
+    mkdir -p "${out_dir}"
+
+    python local/scan_librimix.py \
+      "${dataset_path}" \
+      --outfile "${out_dir}/samples.jsonl"
+
+    ln -sf samples.jsonl "${out_dir}/raw.list"
+  done
+
+  for dset in test; do
+    mix_index="${real_data}/${noise_type}/${dset}/samples.jsonl"
+    out_dir="${real_data}/${noise_type}/${dset}/cues"
+    spatial_root=${mix_data_path}/${dset}/spatial
+    mkdir -p "${out_dir}"
+
+    # 1. 只需要生成 spatial.json (因为 audio.json 已经用不到了，但我保留它防止底层其他依赖)
+    python local/build_spatial_cues.py \
+      --samples_jsonl "${mix_index}" \
+      --spatial_root "${spatial_root}" \
+      --outfile "${out_dir}/spatial.json"
+
+    # 2. 核心魔法：一步直接生成 fixed_enroll.json，踢掉 build_fixed_enroll.py！
+    python local/generate_mix2enroll_m.py \
+      --samples_jsonl "${mix_index}" \
+      --enroll_dir "${mix_data_path}/${dset}/enroll" \
+      --outfile "${out_dir}/fixed_enroll.json"
+
+    # 3. Generate cues.yaml for dev/test
+    cat > ${real_data}/${noise_type}/${dset}/cues.yaml << EOF
+cues:
+  audio:
+    type: raw
+    guaranteed: true
+    scope: speaker
+    policy:
+      type: fixed
+      key: mix_spk_id
+      resource: ${data}/${noise_type}/${dset}/cues/fixed_enroll.json
+  spatial:
+    type: npy
+    guaranteed: true
+    scope: speaker
+    policy:
+      type: fixed
+      key: mix_spk_id
+      resource: ${data}/${noise_type}/${dset}/cues/spatial.json
+    spatial_fields: ["azimuth","elevation"]
+EOF
+  done
+fi

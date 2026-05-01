@@ -43,6 +43,7 @@ from wesep.utils.executor import Executor
 from wesep.utils.losses import parse_loss
 from wesep.utils.utils import parse_config_or_kwargs, set_seed, setup_logger
 from wesep.utils.file_utils import load_yaml
+import json
 
 MAX_NUM_log_files = 100  # The maximum number of log-files to be kept
 logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
@@ -254,7 +255,17 @@ def train(config="conf/config.yaml", **kwargs):
             logger.info(line)
     dist.barrier(device_ids=[gpu])  # synchronize here
 
-    executor = Executor()
+    # 在实例化 Executor 之前读取生成的映射字典
+    with open(
+            '/home/yxy05/code/research_tse/examples/audio/librimix/data/clean/train-100/spk2id.json',
+            'r') as f:
+        spk2id_dict = json.load(f)
+
+    # 传入 Executor
+    executor = Executor(
+        spk2id_dict=spk2id_dict,
+        sv_loss_weight=0.1  # 调参重点：可以从 0.1~0.5 开始
+    )
     executor.step = 0
 
     train_losses = []

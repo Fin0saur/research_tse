@@ -21,7 +21,7 @@ mix_data_path="${Libri2Mix_dir}/wav${fs}/${min_max}"
 gpus="[1,2,3,4,5,6,7]"
 config=confs/tse_new.yaml
 data_config=confs/create_dataset.yaml
-exp_dir=exp/TSE_soundcompass
+exp_dir=exp/TSE_handcraft
 if [ -z "${config}" ] && [ -f "${exp_dir}/config.yaml" ]; then
   config="${exp_dir}/config.yaml"
 fi
@@ -104,7 +104,7 @@ if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
     --src_path $exp_dir/models \
     --num ${num_avg} \
     --mode best \
-    --epochs "42,45,48,51,54"
+    --epochs "91,92,93,94,95"
 fi
 if [ -z "${checkpoint}" ] && [ -f "${exp_dir}/models/avg_best_model.pt" ]; then
   checkpoint="${exp_dir}/models/avg_best_model.pt"
@@ -133,4 +133,10 @@ if [ ${stage} -le 6 ] && [ ${stop_stage} -ge 6 ]; then
     --use_dnsmos "${use_dnsmos}" \
     --dnsmos_use_gpu "${dnsmos_use_gpu}" \
     --n_gpu "${num_gpus}"
+fi
+
+if [ ${stage} -le 7 ] && [ ${stop_stage} -ge 7 ]; then
+  echo "Generate datasets ..."
+  python ./local/create_dataset_spatial.py --config ${data_config} \
+    --stage "probe"
 fi

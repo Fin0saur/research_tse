@@ -8,6 +8,7 @@ from __future__ import print_function
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from wesep.modules.speaker.spk_frontend import SpeakerFrontend
 from wesep.modules.separator.bsrnn import BSRNN
@@ -62,8 +63,14 @@ class TSE_BSRNN_SPK(nn.Module):
                     "sample_rate": sep_configs["sr"]
                 },
             },
+            # 🌟 新增：SV Head 分类器配置默认值
+            "sv_head": {
+                "enabled": True,
+                "num_speakers": 251
+            }
         }
         self.spk_configs = deep_update(spk_configs, config['speaker'])
+
         # ===== Separator Loading =====
         if self.spk_configs["features"]["usef"]["enabled"]:
             sep_configs["spec_dim"] = self.spk_configs["features"]["usef"][
@@ -71,11 +78,26 @@ class TSE_BSRNN_SPK(nn.Module):
         if self.spk_configs["features"]["tfmap"]["enabled"]:
             sep_configs["spec_dim"] = sep_configs["spec_dim"] + 1  #
         self.sep_model = BSRNN(**sep_configs)
+
         # ===== Speaker Loading =====
         if self.spk_configs["features"]["context"]["enabled"]:
             self.spk_configs["features"]["context"][
                 "band"] = self.sep_model.nband  #
         self.spk_ft = SpeakerFrontend(self.spk_configs)
+
+        # 🌟 修改：挂载全连接分类头 (SV Head) 并保留频率维度
+        if self.spk_configs.get("sv_head", {}).get("enabled", False):
+            if self.spk_configs["features"]["usef"]["enabled"]:
+                # 算出 Freq 维度 (BSRNN 的频点数通常是 win // 2 + 1)
+                f_dim = sep_configs["win"] // 2 + 1
+                emb_dim = self.spk_configs["features"]["usef"]["emb_dim"]
+                # 展平后的总维度：通道数 * 频率数
+                in_dim = emb_dim * f_dim
+            else:
+                in_dim = 256  # 默认 fallback 维度
+            self.sv_head = nn.Linear(
+                in_features=in_dim,
+                out_features=self.spk_configs["sv_head"]["num_speakers"])
 
     def forward(self, mix, enroll):
         """
@@ -84,9 +106,10 @@ class TSE_BSRNN_SPK(nn.Module):
             enroll: list[Tensor]
                 each Tensor: [B, 1, T]
         """
-
+        if isinstance(enroll, (list, tuple)):
+            enroll = enroll[0]
         mix = mix.squeeze(1)
-        enroll = enroll[0].squeeze(1)
+        enroll = enroll.squeeze(1)
 
         # input shape: (B, T)
         mix_dims = mix.dim()
@@ -97,6 +120,10 @@ class TSE_BSRNN_SPK(nn.Module):
         ###### Extraction with speaker cue
         batch_size, nsamples = mix.shape
         wav_mix = mix
+
+        # 🌟 新增：初始化声纹 logits
+        spk_logits = None
+
         ###########################################################
         # C0. Feature: listen
         if self.spk_configs['features']['listen']['enabled']:
@@ -116,11 +143,24 @@ class TSE_BSRNN_SPK(nn.Module):
                 -1]  # (B, F, T_e) complex
             enroll_spec = torch.stack([enroll_spec.real, enroll_spec.imag],
                                       1)  # (B, 2, F, T)
+
+            # 这里的 enroll_usef 就是目标说话人在当前时频单元下的特征映射
             enroll_usef, mix_usef = self.spk_ft.usef.compute(
                 enroll_spec, spec_RI)  # (B, embed_dim, F, T)
+
+            # 🌟 修改：仅对时间轴做 Pooling，保留并展平频率轴
+            if self.spk_configs.get("sv_head", {}).get("enabled", False):
+                # 1. 仅在时间轴 (dim=-1) 上求平均，保留频域分布，变为 (B, emb_dim, F)
+                e_time_pooled = enroll_usef.mean(dim=-1)
+
+                # 2. 展平为 (B, emb_dim * F) 喂给线性层
+                e_global = e_time_pooled.view(batch_size, -1)
+                spk_logits = self.sv_head(e_global)
+
             # C1.2 Concate the USEF feature to the mix_repr's spec
             spec_RI = self.spk_ft.usef.post(
                 mix_usef, enroll_usef)  # (B, embed_dim*2, F, T)
+
         # C2. Feature: tfmap
         if self.spk_configs['features']['tfmap']['enabled']:
             # C2.1 Generate the TF-Map feature
@@ -172,71 +212,9 @@ class TSE_BSRNN_SPK(nn.Module):
             # C0.2 Prepend the enroll to the mix in the beginning
             s = self.spk_ft.listen.post(s)  # (B, T)
         ###########################################################
+
+        # 🌟 新增：如果启用了 SV Head，将分离出的音频和声纹 logits 一起返回
+        if self.spk_configs.get("sv_head", {}).get("enabled", False):
+            return s, spk_logits
+
         return s
-
-
-def check_causal(model):
-    input = torch.randn(1, 16000 * 8).clamp_(-1, 1)
-    enroll = torch.randn(1, 16000 * 2).clamp_(-1, 1)
-    fs = 16000
-    model = model.eval()
-    with torch.no_grad():
-        out1 = model(input, enroll)
-        for i in range(fs * 1, fs * 4, fs):
-            inputs2 = input.clone()
-            inputs2[..., i:] = 1 + torch.rand_like(inputs2[..., i:])
-            out2 = model(inputs2, enroll)
-            print((((out1[0] - out2[0]).abs() > 1e-8).float().argmax()) / fs)
-            print((((inputs2 - input).abs() > 1e-8).float().argmax()) / fs)
-
-
-if __name__ == "__main__":
-    from thop import profile, clever_format
-
-    config = dict()
-    config['separator'] = dict(
-        sr=16000,
-        win=512,
-        stride=128,
-        feature_dim=128,
-        num_repeat=6,
-        causal=True,
-        nspk=1,
-    )
-    config['speaker'] = {
-        "features": {
-            "listen": {
-                "enabled": True
-            },
-            "usef": {
-                "enabled": True
-            },
-            "tfmap": {
-                "enabled": True
-            },
-            "context": {
-                "enabled": True
-            },
-            "spkemb": {
-                "enabled": True
-            },
-        }
-    }
-    model = TSE_BSRNN_SPK(config)
-    s = 0
-    for param in model.parameters():
-        s += np.product(param.size())
-    print("# of parameters: " + str(s / 1024.0 / 1024.0))
-    mix = torch.randn(4, 32000)
-    enroll = torch.randn(4, 31235)
-    model = model.eval()
-    with torch.no_grad():
-        output = model(mix, enroll)
-    print(output.shape)
-
-    check_causal(model)
-    exit()
-
-    macs, params = profile(model, inputs=(x, spk_embeddings))
-    macs, params = clever_format([macs, params], "%.3f")
-    print(macs, params)

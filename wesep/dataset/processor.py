@@ -241,9 +241,15 @@ def parse_raw(data):
                 wav_list = []
                 break
 
-            # normalize shape to (T,)
-            if wav_ch.dim() == 2 and wav_ch.size(0) == 1:
-                wav_ch = wav_ch.squeeze(0)
+            # normalize shape to (1, T)
+            if wav_ch.dim() == 1:
+                wav_ch = wav_ch.unsqueeze(0)
+            elif wav_ch.dim() != 2:
+                logging.warning(
+                    f"Unsupported number of channels in mix wav: {mix_path}, shape={tuple(wav_ch.shape)}"
+                )  # noqa
+                wav_list = []
+                break
 
             if sample_rate is None:
                 sample_rate = sr
@@ -668,72 +674,28 @@ def resample(data, resample_rate=16000):
         yield sample
 
 
-# def get_random_chunk_oldversion(data_list, chunk_len):
-#     """Get random chunk
-
-#     Args:
-#         data_list: [torch.Tensor: 1XT] (random len)
-#         chunk_len: chunk length
-
-#     Returns:
-#         [torch.Tensor] (exactly chunk_len)
-#     """
-#     # Assert all entries in the list share the same length
-#     assert False not in [len(i) == len(data_list[0]) for i in data_list]
-#     data_list = [data[0] for data in data_list]
-
-#     data_len = len(data_list[0])
-
-#     # random chunk
-#     if data_len >= chunk_len:
-#         chunk_start = random.randint(0, data_len - chunk_len)
-#         for i in range(len(data_list)):
-#             temp_data = data_list[i][chunk_start:chunk_start + chunk_len]
-#             while torch.equal(temp_data, torch.zeros_like(temp_data)):
-#                 chunk_start = random.randint(0, data_len - chunk_len)
-#                 temp_data = data_list[i][chunk_start:chunk_start + chunk_len]
-#             data_list[i] = temp_data
-#             # re-clone the data to avoid memory leakage
-#             if type(data_list[i]) == torch.Tensor:
-#                 data_list[i] = data_list[i].clone()
-#             else:  # np.array
-#                 data_list[i] = data_list[i].copy()
-#     else:
-#         # padding
-#         repeat_factor = chunk_len // data_len + 1
-#         for i in range(len(data_list)):
-#             if type(data_list[i]) == torch.Tensor:
-#                 data_list[i] = data_list[i].repeat(repeat_factor)
-#             else:  # np.array
-#                 data_list[i] = np.tile(data_list[i], repeat_factor)
-#             data_list[i] = data_list[i][:chunk_len]
-#     data_list = [data.unsqueeze(0) for data in data_list]
-#     return data_list
-
-
 def get_random_chunk(data_list, chunk_len):
     """
     Args:
         data_list: list[Tensor], shapes like
-                   mix: [1, C, T]
-                   target: [1, T] or [T]
+                   mix, targets: [1, C, T] or [1, T]
         chunk_len: int
 
     Returns:
         list[Tensor], same leading dims, last dim = chunk_len
     """
-    # 1. 去掉 target 的 batch 维（如果有）
+    # 1. extend the dim to 2 if needed, to unify the processing of mix and target
     normed = []
     for d in data_list:
-        if d.dim() == 2:
+        if d.dim() == 1:
             d = d.unsqueeze(0)  # [1, T]
         normed.append(d)
 
-    # 2. 时间长度一致性
+    # 2. check the time length and get T
     T = normed[0].size(-1)
     assert all(d.size(-1) == T for d in normed)
 
-    # 3. 随机切片
+    # 3. random chunk if possible
     if T >= chunk_len:
         chunk_start = random.randint(0, T - chunk_len)
 
@@ -741,13 +703,19 @@ def get_random_chunk(data_list, chunk_len):
         for d in normed:
             chunk = d[..., chunk_start:chunk_start + chunk_len]
 
-            # 防止全 0（通常只对 target 有意义）
             while torch.all(chunk == 0):
                 chunk_start = random.randint(0, T - chunk_len)
                 chunk = d[..., chunk_start:chunk_start + chunk_len]
 
             out.append(chunk.clone())
-        return out
+
+        meta = {
+            "start_ratio": chunk_start / T,
+            "end_ratio": (chunk_start + chunk_len) / T,
+            "orig_len": T,
+            "chunk_len": chunk_len,
+        }
+        return out, meta
 
     # 4. padding / repeat
     repeat_factor = chunk_len // T + 1
@@ -756,7 +724,14 @@ def get_random_chunk(data_list, chunk_len):
         d_rep = d.repeat(*([1] * (d.dim() - 1)), repeat_factor)
         out.append(d_rep[..., :chunk_len].clone())
 
-    return out
+    meta = {
+        "start_ratio": 0.0,
+        "end_ratio": chunk_len / T,  # > 1.0, indicating repeated
+        "orig_len": T,
+        "chunk_len": chunk_len,
+    }
+
+    return out, meta
 
 
 def filter_len(
@@ -785,7 +760,9 @@ def filter_len(
         if wav.size(-1) < min_len:
             continue
         elif wav.size(-1) > max_len:
-            wav = get_random_chunk([wav], max_len)[0]
+            wav, _ = get_random_chunk(
+                [wav], max_len
+            )[0]  # may result in spliting an utterance, the ratio should be recorded if needed
         sample["wav"] = wav
         yield sample
 
@@ -804,8 +781,9 @@ def random_chunk(data, chunk_len):
         assert "key" in sample
         wav_keys = [key for key in list(sample.keys()) if "wav" in key]
         wav_data_list = [sample[key] for key in wav_keys]
-        wav_data_list = get_random_chunk(wav_data_list, chunk_len)
+        wav_data_list, ratio = get_random_chunk(wav_data_list, chunk_len)
         sample.update(zip(wav_keys, wav_data_list))
+        sample["chunk_ratio"] = ratio
         yield sample
 
 
