@@ -45,6 +45,7 @@ wespeaker_models
 *.zip
 
 *.png
+*.1
 
 data_probe/
 data_zero/
