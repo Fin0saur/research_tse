@@ -18,9 +18,10 @@ Libri2Mix_dir=/data0/import/asr/Libri2Mix
 mix_data_path="${Libri2Mix_dir}/wav${fs}/${min_max}"
 
 # Training related
-gpus="[0]"
+gpus="[1,7]"
+infer_gpu=0
 config=confs/tse_bsrnn_spk.yaml
-exp_dir=/mnt/code/research_tse/examples/audio/librimix/exp/TSE_BSRNN_SPK_EMB_cor
+exp_dir=/data2/yxy05/exp/TSE_BSRNN_SPK_EMB_cor
 if [ -z "${config}" ] && [ -f "${exp_dir}/config.yaml" ]; then
   config="${exp_dir}/config.yaml"
 fi
@@ -386,58 +387,58 @@ fi
 
 save_results="True"
 
-# if [ ${stage} -le 24 ] && [ ${stop_stage} -ge 24 ]; then
-#   echo "🚀 Start inferencing in parallel (4 processes on GPUs 0,6) ..."
+if [ ${stage} -le 24 ] && [ ${stop_stage} -ge 24 ]; then
+  echo "🚀 Start inferencing in parallel (4 processes on GPUs 0,6) ..."
 
-#   # NUM_SHARDS=4
+  # NUM_SHARDS=4
 
-#   # # GPU 分配：2 个进程跑 GPU 0，2 个进程跑 GPU 6
-#   # declare -a GPU_ARRAY=(0 0 6 6)
+  # # GPU 分配：2 个进程跑 GPU 0，2 个进程跑 GPU 6
+  # declare -a GPU_ARRAY=(0 0 6 6)
 
-#   # # 1. 开启 4 个后台进程并行提取特征和音频，分布在 GPU 0 和 GPU 6 上
-#   # for i in {0..3}; do
-#   #   gpu=${GPU_ARRAY[$i]}
-#   #   echo "Submitting Shard $i on GPU $gpu..."
-#   #   python wesep/bin/infer_exp16.py infer \
-#   #     --config $config \
-#   #     --fs ${fs} \
-#   #     --gpus $gpu \
-#   #     --num_shards $NUM_SHARDS \
-#   #     --shard_id $i \
-#   #     --exp_dir ${exp_dir} \
-#   #     --data_type "${data_type}" \
-#   #     --test_data ${data}/test/${data_type}.list \
-#   #     --test_cues ${data}/test/cues.yaml \
-#   #     --test_samples ${data}/test/samples.jsonl \
-#   #     --save_wav ${save_results} \
-#   #     --checkpoint "/home/yxy05/code/research_tse/examples/audio/librimix/exp/TSE_BSRNN_SPK_EMB/models/avg_best_model.pt" > ${exp_dir}/infer_shard_${i}.log 2>&1 &
-#   # done
+  # # 1. 开启 4 个后台进程并行提取特征和音频，分布在 GPU 0 和 GPU 6 上
+  # for i in {0..3}; do
+  #   gpu=${GPU_ARRAY[$i]}
+  #   echo "Submitting Shard $i on GPU $gpu..."
+  #   python wesep/bin/infer_exp16.py infer \
+  #     --config $config \
+  #     --fs ${fs} \
+  #     --gpus $gpu \
+  #     --num_shards $NUM_SHARDS \
+  #     --shard_id $i \
+  #     --exp_dir ${exp_dir} \
+  #     --data_type "${data_type}" \
+  #     --test_data ${data}/test/${data_type}.list \
+  #     --test_cues ${data}/test/cues.yaml \
+  #     --test_samples ${data}/test/samples.jsonl \
+  #     --save_wav ${save_results} \
+  #     --checkpoint "/home/yxy05/code/research_tse/examples/audio/librimix/exp/TSE_BSRNN_SPK_EMB/models/avg_best_model.pt" > ${exp_dir}/infer_shard_${i}.log 2>&1 &
+  # done
 
-#   # # 2. wait 极其关键！它会锁住当前终端，直到上面 4 个挂起(&)的任务全部执行完毕
-#   # echo "⏳ All 4 shards submitted. Waiting for feature extraction to finish..."
-#   # wait
-#   # echo "✅ Feature extraction on GPU 0 completed!"
+  # # 2. wait 极其关键！它会锁住当前终端，直到上面 4 个挂起(&)的任务全部执行完毕
+  # echo "⏳ All 4 shards submitted. Waiting for feature extraction to finish..."
+  # wait
+  # echo "✅ Feature extraction on GPU 0 completed!"
 
-#   # # 3. 提取全部完成后，调用绘图引擎自动筛选并画图 (生成 10 张高亮神图)
-#   # echo "🎨 Start automated cherry-picking and global t-SNE plotting ..."
-#   # python wesep/bin/infer_exp16.py plot \
-#   #     --config $config \
-#   #     --exp_dir ${exp_dir}
+  # # 3. 提取全部完成后，调用绘图引擎自动筛选并画图 (生成 10 张高亮神图)
+  # echo "🎨 Start automated cherry-picking and global t-SNE plotting ..."
+  # python wesep/bin/infer_exp16.py plot \
+  #     --config $config \
+  #     --exp_dir ${exp_dir}
 
-#   #   # 4. 🌟 调用象限验证引擎，解耦【混淆】与【畸变】
-#   # echo "🔬 Start hypothesis verification (S_tgt vs S_int Quadrant Plot) ..."
-#   # python wesep/bin/infer_exp16.py verify \
-#   #     --config $config \
-#   #     --exp_dir ${exp_dir}
+  #   # 4. 🌟 调用象限验证引擎，解耦【混淆】与【畸变】
+  # echo "🔬 Start hypothesis verification (S_tgt vs S_int Quadrant Plot) ..."
+  # python wesep/bin/infer_exp16.py verify \
+  #     --config $config \
+  #     --exp_dir ${exp_dir}
 
-#   # 5. 🎨 调用两类样本 t-SNE 绘图引擎
-#   echo "🎨 Start two-category t-SNE plotting (Cat1: Interferer Extracted, Cat2: Audio Distortion) ..."
-#   python wesep/bin/infer_exp16.py plot_two_category \
-#       --config $config \
-#       --exp_dir ${exp_dir}
+  # 5. 🎨 调用两类样本 t-SNE 绘图引擎
+  echo "🎨 Start two-category t-SNE plotting (Cat1: Interferer Extracted, Cat2: Audio Distortion) ..."
+  python wesep/bin/infer_exp16.py plot_two_category \
+      --config $config \
+      --exp_dir ${exp_dir}
 
-#   echo "🎉 Stage 24 All Done! 请去 ${exp_dir} 查看图表和音频！"
-# fi
+  echo "🎉 Stage 24 All Done! 请去 ${exp_dir} 查看图表和音频！"
+fi
 
 # ========================================================
 # Stage 24: 生成偏差注册数据集 (1扩20)
@@ -572,7 +573,7 @@ fi
 if [ ${stage} -le 28 ] && [ ${stop_stage} -ge 28 ]; then
   echo "🚀 偏差数据集预打分 ..."
 
-  CHECKPOINT="/mnt/data0/ckpt/avg_best_model.pt"
+  CHECKPOINT="/home/yxy05/code/research_tse/examples/audio/librimix/exp/TSE_BSRNN_SPK_EMB/models/avg_best_model.pt"
 
   # ===== Phase 1: train-100 分 4 张 GPU =====
   echo "   [Phase 1] 正在打分 train-100 偏差数据集 (4 GPU 并行) ..."
@@ -625,18 +626,18 @@ if [ ${stage} -le 28 ] && [ ${stop_stage} -ge 28 ]; then
     --shard_id 3 > ${exp_dir}/score_train_s3.log 2>&1 &
   PID_S3=$!
 
-  # echo "   等待 train-100 4 个 shard 完成 ..."
-  # wait $PID_S0
-  # echo "   ✅ Train shard 0 完成"
-  # wait $PID_S1
-  # echo "   ✅ Train shard 1 完成"
-  # wait $PID_S2
-  # echo "   ✅ Train shard 2 完成"
-  # wait $PID_S3
-  # echo "   ✅ Train shard 3 完成"
+  echo "   等待 train-100 4 个 shard 完成 ..."
+  wait $PID_S0
+  echo "   ✅ Train shard 0 完成"
+  wait $PID_S1
+  echo "   ✅ Train shard 1 完成"
+  wait $PID_S2
+  echo "   ✅ Train shard 2 完成"
+  wait $PID_S3
+  echo "   ✅ Train shard 3 完成"
 
-  # # ===== Phase 2: dev 和 test 各分 2 shard，4 GPU 同时跑 =====
-  # echo "   [Phase 2] 正在打分 dev 和 test 偏差数据集 (4 GPU 并行) ..."
+  # ===== Phase 2: dev 和 test 各分 2 shard，4 GPU 同时跑 =====
+  echo "   [Phase 2] 正在打分 dev 和 test 偏差数据集 (4 GPU 并行) ..."
 
   # GPU 0: dev shard 0
   python wesep/bin/score_bias_dataset.py \
@@ -699,49 +700,152 @@ if [ ${stage} -le 28 ] && [ ${stop_stage} -ge 28 ]; then
 fi
 
 # ========================================================
-# Stage 29: 独立探针训练 (Independent Probe Training)
-# 冻结主干网络，分别训练 prior/pmap/post_concat 三个探针
-# 比较哪个特征最适合预测分离效果
+# Stage 29: Target Confusion 分析 (USEF Cross-Attention + Target Mask 响应度)
 # ========================================================
 if [ ${stage} -le 29 ] && [ ${stop_stage} -ge 29 ]; then
-  echo "🚀 独立探针训练: prior / pmap / post ..."
+  echo "🚀 Stage 29: Start Target Confusion analysis (USEF response separation) ..."
 
-  # 预训练权重路径
-  BSRNN_CKPT="/mnt/data0/ckpt/avg_best_model.pt"
-  ECAPA_PRETRAINED="./wespeaker_models/voxceleb_ECAPA512/avg_model.pt"
 
-  # 输出目录
-  PROBE_EXP_DIR="${exp_dir}/probe_single"
+  checkpoint="/home/yxy05/code/research_tse/examples/audio/librimix/exp/TSE_BSRNN_SPK_EMB/models/avg_best_model.pt"
 
-  # GPU数量
-  num_gpus=$(echo $gpus | awk -F ',' '{print NF}')
 
-  # 分别训练三个探针
-  for probe_type in pmap post; do
-    echo "=========================================="
-    echo "Training ${probe_type} probe ..."
-    echo "=========================================="
+  python wesep/bin/infer_exp18.py analyze \
+    --config $config \
+    --gpus 0 \
+    --exp_dir ${exp_dir} \
+    --data_type "${data_type}" \
+    --checkpoint "${checkpoint}" \
+    --bias_jsonl_glob "${data}/enroll_bias/test/bias_enroll20_scored.jsonl.part*" \
+    --max_samples 0 \
+    --conf_thresh 1.0 \
+    --topk_vis 12
 
-    mkdir -p ${PROBE_EXP_DIR}/probe_${probe_type}/models
+  echo "🎉 Stage 29 Done! 结果已保存至 ${exp_dir}/exp18_target_confusion_usef/"
+fi
 
-    torchrun --standalone --nnodes=1 --nproc_per_node=$num_gpus \
-      wesep/bin/train_joint_probe.py \
-      --config $config \
-      --exp_dir ${PROBE_EXP_DIR} \
-      --scored_data_dir ${data}/enroll_bias/train-100 \
-      --eval_data_dir ${data}/enroll_bias/dev \
-      --checkpoint "${BSRNN_CKPT}" \
-      --ecapa_pretrained "${ECAPA_PRETRAINED}" \
-      --probe_type ${probe_type} \
-      --num_epochs 50 \
-      --lr 1e-4 \
-      --batch_size 4 \
-      --sample_num_per_epoch 10000 \
-      --eval_max_batches 1000 \
-      --log_interval 10
 
-    echo "✅ ${probe_type} probe training completed!"
-  done
+# ========================================================
+# Stage 30: Deployment-feasible ATTN AUC 分析 (exp19)
+# ========================================================
+if [ ${stage} -le 30 ] && [ ${stop_stage} -ge 30 ]; then
+  echo "🚀 Stage 30: Start deployment-feasible ATTN AUC analysis ..."
 
-  echo "🎉 Stage 29 Done! 三个探针已分别训练完成，保存至 ${PROBE_EXP_DIR}/probe_{prior,pmap,post}/"
+  checkpoint="/home/yxy05/code/research_tse/examples/audio/librimix/exp/TSE_BSRNN_SPK_EMB/models/avg_best_model.pt"
+
+  python wesep/bin/infer_exp19.py analyze \
+    --config $config \
+    --gpus 0 \
+    --exp_dir ${exp_dir} \
+    --data_type "${data_type}" \
+    --checkpoint "${checkpoint}" \
+    --bias_jsonl_glob "${data}/enroll_bias/test/bias_enroll20_scored.jsonl.part*" \
+    --max_samples 200 \
+    --conf_thresh 1.0 \
+    --balance_by json_label \
+    --num_stability_crops 3 \
+    --num_robust_cues 3
+
+  echo "🎉 Stage 30 Done! 结果已保存至 ${exp_dir}/exp19_deployable_attn_auc/"
+fi
+
+
+# ========================================================
+# Stage 31: 训练 Deployable Risk Head (exp20)
+# 基于 USEF attention 统计特征预测 Target Confusion（二分类）
+# ========================================================
+if [ ${stage} -le 31 ] && [ ${stop_stage} -ge 31 ]; then
+  echo "🚀 Stage 31: Start training deployable risk head (exp20) ..."
+
+  checkpoint="/home/yxy05/code/research_tse/examples/audio/librimix/exp/TSE_BSRNN_SPK_EMB/models/avg_best_model.pt"
+
+  python wesep/bin/train_exp20_risk_head.py \
+    --config $config \
+    --gpus ${infer_gpu} \
+    --exp_dir ${exp_dir} \
+    --data_type "${data_type}" \
+    --train_data ${data}/train-100/${data_type}.list \
+    --train_cues ${data}/train-100/cues.yaml \
+    --train_samples ${data}/train-100/samples.jsonl \
+    --val_data ${data}/dev/${data_type}.list \
+    --val_cues ${data}/dev/cues.yaml \
+    --val_samples ${data}/dev/samples.jsonl \
+    --checkpoint "${checkpoint}" \
+    --out_tag exp20_deployable_risk_head \
+    --conf_thresh 1.0 \
+    --fine_tune_epochs 4 \
+    --phase1_warmup_scope usef \
+    --phase1_warmup_epochs 2 \
+    --fine_tune_scope usef \
+    --ft_lr 3e-5 \
+    --fine_tune_batch_size 8 \
+    --accum_steps 2 \
+    --use_amp True \
+    --sep_loss_name SISDR \
+    --lambda_sep 1.0 \
+    --lambda_risk 0.2 \
+    --epochs 8 \
+    --lr 1e-3 \
+    --hidden_dim 64 \
+    --dropout 0.2 \
+    --pos_weight 1.0 \
+    --log_interval 50
+
+  echo "🎉 Stage 31 Done! 结果已保存至 ${exp_dir}/exp20_deployable_risk_head/"
+fi
+
+# ========================================================
+# Stage 32: 学习型 USEF Attention Predictor (exp21)
+# collect attention tensor -> train classifier
+# ========================================================
+if [ ${stage} -le 32 ] && [ ${stop_stage} -ge 32 ]; then
+  echo "🚀 Stage 32: Start exp21 early USEF predictor ..."
+
+  checkpoint="/home/yxy05/code/research_tse/examples/audio/librimix/exp/TSE_BSRNN_SPK_EMB/models/avg_best_model.pt"
+
+  # 1) collect train tensors
+  python wesep/bin/infer_exp21.py collect \
+    --config $config \
+    --gpus ${infer_gpu} \
+    --exp_dir ${exp_dir} \
+    --data_type "${data_type}" \
+    --checkpoint "${checkpoint}" \
+    --split train \
+    --bias_jsonl_glob "${data}/enroll_bias/train-100/bias_enroll20_scored.jsonl.part*" \
+    --max_samples 4000 \
+    --conf_thresh 1.0 \
+    --t_bins 96 \
+    --out_tag exp21_early_usef_predictor
+
+  # 2) collect dev tensors
+  python wesep/bin/infer_exp21.py collect \
+    --config $config \
+    --gpus ${infer_gpu} \
+    --exp_dir ${exp_dir} \
+    --data_type "${data_type}" \
+    --checkpoint "${checkpoint}" \
+    --split dev \
+    --bias_jsonl_glob "${data}/enroll_bias/dev/bias_enroll20_scored.jsonl.part*" \
+    --max_samples 2000 \
+    --conf_thresh 1.0 \
+    --t_bins 96 \
+    --out_tag exp21_early_usef_predictor
+
+  # 3) train predictor
+  python wesep/bin/infer_exp21.py train \
+    --config $config \
+    --gpus ${infer_gpu} \
+    --exp_dir ${exp_dir} \
+    --out_tag exp21_early_usef_predictor \
+    --train_npz "${exp_dir}/exp21_early_usef_predictor/train_attn_tensor.npz" \
+    --val_npz "${exp_dir}/exp21_early_usef_predictor/dev_attn_tensor.npz" \
+    --epochs 20 \
+    --batch_size 32 \
+    --lr 1e-3 \
+    --weight_decay 1e-4 \
+    --pos_weight 5.0 \
+    --hidden 128 \
+    --dropout 0.2 \
+    --seed 42
+
+  echo "🎉 Stage 32 Done! 结果已保存至 ${exp_dir}/exp21_early_usef_predictor/"
 fi
